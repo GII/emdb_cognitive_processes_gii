@@ -21,6 +21,8 @@ from core_interfaces.msg import ControlMsg
 
 from core.cognitive_node import CognitiveNode
 
+from core.utils import perception_dict_to_msg, perception_msg_to_dict
+
 
 
 
@@ -108,7 +110,7 @@ class MainLoop(Node):
         return sensing
 
     def receive_perception_callback(self, msg):
-        perception_dict=CognitiveNode.perception_msg_to_dict(msg)
+        perception_dict=perception_msg_to_dict(msg)
         
         for sensor in perception_dict.keys():
             if sensor in self.perception_cache:
@@ -238,7 +240,7 @@ class MainLoop(Node):
     def request_activation(self, name, sensing):
         service_name = 'cognitive_node/' + str(name) + '/get_activation'
         activation_client = ServiceClient(GetActivation, service_name)
-        perception = CognitiveNode.perception_dict_to_msg(sensing)
+        perception = perception_dict_to_msg(sensing)
         activation = activation_client.send_request(perception = perception)
         activation_client.destroy_node()
         return activation.activation
@@ -351,7 +353,7 @@ class MainLoop(Node):
     def add_point(self, name, sensing):
         service_name = 'pnode/' + str(name) + '/add_point'
         add_point_client = ServiceClient(AddPoint, service_name)
-        perception = CognitiveNode.perception_dict_to_msg(sensing)
+        perception = perception_dict_to_msg(sensing)
 
         response = add_point_client.send_request(point= perception, confidence=1.0)
         add_point_client.destroy_node()
@@ -364,7 +366,7 @@ class MainLoop(Node):
     def add_antipoint(self, name, sensing):
         service_name = 'pnode/' + str(name) + '/add_point'
         add_point_client = ServiceClient(AddPoint, service_name)
-        perception = CognitiveNode.perception_dict_to_msg(sensing)
+        perception = perception_dict_to_msg(sensing)
 
         response = add_point_client.send_request(point= perception, confidence=-1.0)
         add_point_client.destroy_node()
