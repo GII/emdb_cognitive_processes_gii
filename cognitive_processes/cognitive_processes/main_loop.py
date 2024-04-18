@@ -45,7 +45,7 @@ class MainLoop(Node):
         self.iterations= 0
         self.trials=0
         self.trial=0
-        self.period=0
+        self.period=1
         self.current_policy = None
         self.paused=False
         self.stop=False
@@ -58,6 +58,8 @@ class MainLoop(Node):
         self.reward_threshold= 0.9
         self.subgoals=False
         self.policies_to_test=[]
+        self.current_reward=0
+        self.current_world=None
 
         self.control_publisher= self.create_publisher(ControlMsg, 'main_loop/control', 10)
 
@@ -425,7 +427,7 @@ class MainLoop(Node):
         """Reset the world if necessary, according to the experiment parameters."""
         changed = False
         self.trial += 1
-        if self.trial == self.trials or self.current_reward > 0.9:
+        if self.trial == self.trials or self.current_reward > 0.9 or self.iteration==1:
             self.trial = 0
             changed = True
         if ((self.iteration % self.period) == 0):
@@ -457,6 +459,9 @@ class MainLoop(Node):
 
         self.get_logger().info('Running MDB with LTM:' + str(self.LTM_id))
 
+        self.current_world=self.get_current_world_model()
+
+        self.reset_world()
         sensing = self.read_perceptions()
         stm=[]
         while (self.iteration<=self.iterations) and (not self.stop): # TODO: check conditions to continue the loop
