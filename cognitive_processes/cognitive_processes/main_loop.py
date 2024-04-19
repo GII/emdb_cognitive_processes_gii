@@ -81,13 +81,13 @@ class MainLoop(Node):
         loop_thread = threading.Thread(target=self.run, daemon=True)
         loop_thread.start()
 
-        self.get_iteration_service = self.create_service(GetIteration, '/main_loop/get_iteration', self.get_iteration_callback)
+        
     
     def configure_perceptions(self): #TODO(efallash): Add condition so that perceptions that are already included do not create a new suscription. For the case that new perceptions are added to the LTM and only some perceptions need to be configured
         self.get_logger().info('Configuring perceptions...')
         perceptions=[perception for perception in self.LTM_cache if perception['node_type']=='Perception']
 
-        self.get_logger().info(str(perceptions))
+        self.get_logger().debug(f'Perception list: {str(perceptions)}')
 
         for perception_dict in perceptions:
             perception=perception_dict['name']
@@ -99,10 +99,12 @@ class MainLoop(Node):
             self.perception_cache[perception]['flag']=threading.Event()
         #TODO check that all perceptions in the cache still exist in the LTM and destroy suscriptions that are no longer used
 
-    def get_iteration_callback(self, request, response):
-        self.get_logger().info("Getting iteration...")
-        response.iteration = self.iteration
-        return response
+    def publish_iteration(self):
+        msg=ControlMsg()
+        msg.command=""
+        msg.world=self.current_world
+        msg.iteration=self.iteration
+        self.control_publisher.publish(msg)
 
 
     def read_perceptions(self):
@@ -145,13 +147,13 @@ class MainLoop(Node):
         #Process data string
         ltm_cache=yaml.safe_load(ltm_response.data)
 
-        self.get_logger().info(str(ltm_cache))
+        self.get_logger().debug(f'LTM Dump: {str(ltm_cache)}')
 
         for node_type in ltm_cache.keys():
             for node in ltm_cache[node_type].keys():
                 self.LTM_cache.append({'name': node, 'node_type': node_type, 'activation': ltm_cache[node_type][node]['activation']})
 
-        self.get_logger().info(str(self.LTM_cache))
+        self.get_logger().debug(f'LTM Cache: {str(self.LTM_cache)}')
         return None
 
     def ltm_change_callback(self):
@@ -262,7 +264,9 @@ class MainLoop(Node):
         neighbors_names=information.neighbors_name
         neighbors_types=information.neighbors_type
 
-        neighbors = [{'name': node[1], 'node_type': node[2]} for node in zip(neighbors_names,neighbors_types)]
+        neighbors = [{'name': node[0], 'node_type': node[1]} for node in zip(neighbors_names,neighbors_types)]
+
+        self.get_logger().debug(f'REQUESTED NEIGHBORS: {neighbors}')
 
         return neighbors
 
@@ -464,7 +468,8 @@ class MainLoop(Node):
         Run the main loop of the system.
         """
         
-        time.sleep(5)
+        time.sleep(0.5) #TODO: Coordinate startup to avoid using this timer
+        self.get_logger().fatal('**** TIMER DELAY USED - REMOVE ASAP ****')
         self.get_logger().info('Running MDB with LTM:' + str(self.LTM_id))
 
         self.current_world=self.get_current_world_model()
@@ -473,6 +478,7 @@ class MainLoop(Node):
         sensing = self.read_perceptions()
         stm=[]
         while (self.iteration<=self.iterations) and (not self.stop): # TODO: check conditions to continue the loop
+            self.publish_iteration()
 
             if not self.paused:
             
@@ -485,7 +491,7 @@ class MainLoop(Node):
                 if not self.subgoals:
                     self.current_goal = self.get_current_goal()
                     self.current_reward=self.get_current_reward()
-                    self.update_pnodes_reward_basis()
+                    self.update_pnodes_reward_basis(sensing, self.current_policy, self.current_goal, self.current_reward)
                 else:
                     raise NotImplementedError #TODO: Implement prospection methods
                 
