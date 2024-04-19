@@ -7,6 +7,7 @@ import yaml
 import threading
 import numpy
 from copy import copy
+import time
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -14,7 +15,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 #from core_interfaces.srv import SendToLTM
 
 from core.service_client import ServiceClient
-from cognitive_node_interfaces.srv import Execute, GetActivation, IsReached, GetInformation, AddPoint
+from cognitive_node_interfaces.srv import Execute, GetActivation, IsReached, GetInformation, AddPoint, GetIteration
 from cognitive_node_interfaces.msg import Perception
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
 from core_interfaces.msg import ControlMsg
@@ -79,6 +80,8 @@ class MainLoop(Node):
 
         loop_thread = threading.Thread(target=self.run, daemon=True)
         loop_thread.start()
+
+        self.get_iteration_service = self.create_service(GetIteration, '/main_loop/get_iteration', self.get_iteration_callback)
     
     def configure_perceptions(self): #TODO(efallash): Add condition so that perceptions that are already included do not create a new suscription. For the case that new perceptions are added to the LTM and only some perceptions need to be configured
         self.get_logger().info('Configuring perceptions...')
@@ -96,6 +99,10 @@ class MainLoop(Node):
             self.perception_cache[perception]['flag']=threading.Event()
         #TODO check that all perceptions in the cache still exist in the LTM and destroy suscriptions that are no longer used
 
+    def get_iteration_callback(self, request, response):
+        self.get_logger().info("Getting iteration...")
+        response.iteration = self.iteration
+        return response
 
 
     def read_perceptions(self):
@@ -456,7 +463,8 @@ class MainLoop(Node):
         """
         Run the main loop of the system.
         """
-
+        
+        time.sleep(5)
         self.get_logger().info('Running MDB with LTM:' + str(self.LTM_id))
 
         self.current_world=self.get_current_world_model()
