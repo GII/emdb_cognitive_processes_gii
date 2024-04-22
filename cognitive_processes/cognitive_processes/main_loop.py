@@ -304,12 +304,12 @@ class MainLoop(Node):
         
         return goal
     
-    def get_current_reward(self):
+    def get_current_reward(self, perception_dict):
         self.get_logger().info('Reading reward...')
-
+        perception = perception_dict_to_msg(perception_dict)
         service_name = 'goal/' + str(self.current_goal) + '/is_reached'
         reward_client = ServiceClient(IsReached, service_name)
-        reward = reward_client.send_request()
+        reward = reward_client.send_request(perception=perception)
         reward_client.destroy_node()
 
         self.get_logger().info(f'get_current_reward - Reward {reward.reached}')
@@ -490,7 +490,7 @@ class MainLoop(Node):
 
                 if not self.subgoals:
                     self.current_goal = self.get_current_goal()
-                    self.current_reward=self.get_current_reward()
+                    self.current_reward=self.get_current_reward(sensing)
                     self.update_pnodes_reward_basis(sensing, self.current_policy, self.current_goal, self.current_reward)
                 else:
                     raise NotImplementedError #TODO: Implement prospection methods
