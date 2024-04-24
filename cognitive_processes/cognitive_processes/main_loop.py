@@ -394,7 +394,7 @@ class MainLoop(Node):
         ident=f'{world_model}__{goal}__{policy}'
 
         #TODO: Obtain class names from config file
-        space_class = 'cognitive_nodes.space.PointBasedSpace' 
+        space_class = 'cognitive_nodes.space.NormalCentroidPointBasedSpace' 
         pnode_class = 'cognitive_nodes.pnode.PNode' 
         cnode_class = 'cognitive_nodes.pnode.CNode' 
         
@@ -426,10 +426,10 @@ class MainLoop(Node):
 
     def create_node_client(self, name, class_name, parameters={}):
         self.get_logger().info('Requesting node creation')
-
+        params_str=yaml.dump(parameters)
         service_name = 'commander/create'
         client = ServiceClient(CreateNode, service_name)
-        response = client.send_request()
+        response = client.send_request(name = name, class_name = class_name, parameters = params_str)
         client.destroy_node()
 
         return response.created        
