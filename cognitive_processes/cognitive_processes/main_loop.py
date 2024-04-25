@@ -396,7 +396,7 @@ class MainLoop(Node):
         #TODO: Obtain class names from config file
         space_class = 'cognitive_nodes.space.NormalCentroidPointBasedSpace' 
         pnode_class = 'cognitive_nodes.pnode.PNode' 
-        cnode_class = 'cognitive_nodes.pnode.CNode' 
+        cnode_class = 'cognitive_nodes.cnode.CNode' 
         
         pnode_name=f'pnode_{ident}'
         pnode = self.create_node_client(
@@ -414,7 +414,7 @@ class MainLoop(Node):
         cnode= self.create_node_client(
             name=cnode_name,
             class_name=cnode_class,
-            parameters=str(neighbors)
+            parameters=neighbors
         )
 
         if not pnode:
