@@ -342,13 +342,13 @@ class MainLoop(Node):
 
         for cnode in cnodes:
             cnode_neighbors=self.request_neighbors(cnode)
-            world_model=next((name for name, node_type in cnode_neighbors.items() if node_type=='WorldModel'))
-            goal=next((name for name, node_type in cnode_neighbors.items() if node_type=='Goal'))
-            pnode=next((name for name, node_type in cnode_neighbors.items() if node_type=='PNode'))
+            world_model=next((neighbor['name'] for neighbor in cnode_neighbors if neighbor['node_type']=='WorldModel'))
+            goal=next((neighbor['name']  for neighbor in cnode_neighbors if neighbor['node_type']=='Goal'))
+            pnode=next((neighbor['name']  for neighbor in cnode_neighbors if neighbor['node_type']=='PNode'))
 
-            world_model_activation= next([node['activation'] for node in self.LTM_cache if node['name']==world_model])
-            goal_activation= next([node['activation'] for node in self.LTM_cache if node['name']==goal])
-            pnode_activation= next([node['activation'] for node in self.LTM_cache if node['name']==pnode])
+            world_model_activation= next((node['activation'] for node in self.LTM_cache if node['name']==world_model))
+            goal_activation= next((node['activation'] for node in self.LTM_cache if node['name']==goal))
+            pnode_activation= next((node['activation'] for node in self.LTM_cache if node['name']==pnode))
 
 
             if (
@@ -404,11 +404,14 @@ class MainLoop(Node):
             class_name=pnode_class, 
             parameters={'space_class': space_class}
             )
+        #Update LTMCache with new CNode/PNode. This is a HACK, should be integrated with LTM's changes topic
+        self.LTM_cache.append({'name': pnode_name, 'node_type': 'PNode', 'activation': 0}) 
+
         if not pnode:
             self.get_logger().fatal(f'Failed creation of PNode {pnode_name}')
         self.add_point(pnode_name, perception)
 
-        neighbors={'neighbors': [node for node in self.LTM_cache if node['name'] in [world_model,goal,policy,pnode]]}
+        neighbors={'neighbors': [node for node in self.LTM_cache if node['name'] in [world_model,goal,policy,pnode_name]]}
 
         cnode_name=f'cnode_{ident}'
         cnode= self.create_node_client(
@@ -421,7 +424,6 @@ class MainLoop(Node):
             self.get_logger().fatal(f'Failed creation of CNode {cnode_name}')
 
         #Update LTMCache with new CNode/PNode. This is a HACK, should be integrated with LTM's changes topic
-        self.LTM_cache.append({'name': pnode_name, 'node_type': 'PNode', 'activation': 0})
         self.LTM_cache.append({'name': cnode_name, 'node_type': 'CNode', 'activation': 0})
 
     def create_node_client(self, name, class_name, parameters={}):
