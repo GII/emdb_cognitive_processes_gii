@@ -5,6 +5,7 @@ from operator import attrgetter
 import random
 import yaml
 import threading
+
 import numpy
 from copy import copy
 import time
@@ -15,10 +16,11 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 #from core_interfaces.srv import SendToLTM
 
 from core.service_client import ServiceClient
-from cognitive_node_interfaces.srv import Execute, GetActivation, IsReached, GetInformation, AddPoint, GetIteration
+from cognitive_node_interfaces.srv import Execute, GetActivation, GetReward, GetInformation, AddPoint, GetIteration
 from cognitive_node_interfaces.msg import Perception
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
 from core_interfaces.msg import ControlMsg
+from std_msgs.msg import Empty
 
 from core.cognitive_node import CognitiveNode
 
@@ -62,12 +64,17 @@ class MainLoop(Node):
         self.current_reward=0
         self.current_world=None
 
+        self.cbgroup_perception=MutuallyExclusiveCallbackGroup()
+        self.cbgroup_server=MutuallyExclusiveCallbackGroup()
+        self.cbgroup_client=MutuallyExclusiveCallbackGroup()
+        self.cbgroup_loop=MutuallyExclusiveCallbackGroup()
+
+        self.node_clients={} #Keys are service name, values are service client object e.g. {'cognitive_node/policy0/get_activation: "Object: core.ServiceClient(Async)"'}
+
         self.control_publisher= self.create_publisher(ControlMsg, 'main_loop/control', 10)
+        self.run_subscriber= self.create_subscription(Empty, 'main_loop/run', self.run, 1, callback_group=self.cbgroup_loop)
 
 
-
-        self.perception_callback_group=MutuallyExclusiveCallbackGroup()
-        self.services_callback_group=MutuallyExclusiveCallbackGroup()
 
 
         for key, value in params.items():
@@ -92,12 +99,13 @@ class MainLoop(Node):
         for perception_dict in perceptions:
             perception=perception_dict['name']
 
-            subscriber=self.create_subscription(Perception, f'/perception/{perception}/value', self.receive_perception_callback, 1, callback_group= self.perception_callback_group)
+            subscriber=self.create_subscription(Perception, f'/perception/{perception}/value', self.receive_perception_callback, 1, callback_group= self.cbgroup_perception)
             self.get_logger().debug(f'Subscription to: /perception/{perception}/value created')
             self.perception_suscribers[perception]=subscriber
             self.perception_cache[perception]={}
             self.perception_cache[perception]['flag']=threading.Event()
         #TODO check that all perceptions in the cache still exist in the LTM and destroy suscriptions that are no longer used
+        self.get_logger().debug(f'Perception cache: {self.perception_cache}')
 
     def publish_iteration(self):
         msg=ControlMsg()
@@ -116,6 +124,7 @@ class MainLoop(Node):
             self.perception_cache[sensor]['flag'].wait()
             sensing[sensor]=self.perception_cache[sensor]['data']
             self.perception_cache[sensor]['flag'].clear()
+            self.get_logger().debug('Processing perception: '+str(sensor))
 
         self.get_logger().debug('Perceptions: '+str(sensing))
         return sensing
@@ -138,12 +147,10 @@ class MainLoop(Node):
         #Call get_node service from LTM
         service_name = '/' + str(self.LTM_id) + '/get_node'
         request=""
-        client = ServiceClient(GetNodeFromLTM, service_name)
-        ltm_response = client.send_request(name=request)
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
+        ltm_response = self.node_clients[service_name].send_request(name=request)
 
-        
-
-        client.destroy_node()
         #Process data string
         ltm_cache=yaml.safe_load(ltm_response.data)
 
@@ -250,16 +257,17 @@ class MainLoop(Node):
 
     def request_activation(self, name, sensing):
         service_name = 'cognitive_node/' + str(name) + '/get_activation'
-        activation_client = ServiceClient(GetActivation, service_name)
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(GetActivation, service_name)
         perception = perception_dict_to_msg(sensing)
-        activation = activation_client.send_request(perception = perception)
-        activation_client.destroy_node()
+        activation = self.node_clients[service_name].send_request(perception = perception)
         return activation.activation
         
     def request_neighbors(self, name):
         service_name = 'cognitive_node/' + str(name) + '/get_information'
-        information_client=ServiceClient(GetInformation, service_name)
-        information=information_client.send_request()
+        if service_name not in self.node_clients:
+            self.node_clients[service_name]=ServiceClient(GetInformation, service_name)
+        information= self.node_clients[service_name].send_request()
 
         neighbors_names=information.neighbors_name
         neighbors_types=information.neighbors_type
@@ -284,9 +292,9 @@ class MainLoop(Node):
         self.get_logger().info('Executing policy ' + str(policy)+ '...')
 
         service_name = 'policy/' + str(policy) + '/execute'
-        client = ServiceClient(Execute, service_name)
-        policy_response = client.send_request()
-        client.destroy_node()
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(Execute, service_name)
+        policy_response = self.node_clients[service_name].send_request()
         return policy_response.policy
     
     def get_current_goal(self):
@@ -307,14 +315,14 @@ class MainLoop(Node):
     def get_current_reward(self, perception_dict):
         self.get_logger().info('Reading reward...')
         perception = perception_dict_to_msg(perception_dict)
-        service_name = 'goal/' + str(self.current_goal) + '/is_reached'
-        reward_client = ServiceClient(IsReached, service_name)
-        reward = reward_client.send_request(perception=perception)
-        reward_client.destroy_node()
+        service_name = 'goal/' + str(self.current_goal) + '/get_reward'
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(GetReward, service_name)
+        reward = self.node_clients[service_name].send_request(perception=perception)
 
-        self.get_logger().info(f'get_current_reward - Reward {reward.reached}')
+        self.get_logger().info(f'get_current_reward - Reward {reward.reward}')
 
-        return reward.reached
+        return reward.reward
     
     def get_current_world_model(self):
         self.get_logger().info('Selecting world model with higher activation...')
@@ -339,6 +347,8 @@ class MainLoop(Node):
         policy_neighbors=self.request_neighbors(policy)
         cnodes=[node['name'] for node in policy_neighbors if node['node_type']=='CNode']
         threshold=0.1
+
+        self.get_logger().info(f'DEBUG: CNodes: {cnodes}, Reward: {reward}, threshold: {threshold}')
 
         for cnode in cnodes:
             cnode_neighbors=self.request_neighbors(cnode)
@@ -365,12 +375,11 @@ class MainLoop(Node):
 
     def add_point(self, name, sensing):
         service_name = 'pnode/' + str(name) + '/add_point'
-        add_point_client = ServiceClient(AddPoint, service_name)
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(AddPoint, service_name)
+        
         perception = perception_dict_to_msg(sensing)
-
-        response = add_point_client.send_request(point= perception, confidence=1.0)
-        add_point_client.destroy_node()
-
+        response = self.node_clients[service_name].send_request(point= perception, confidence=1.0)
         self.get_logger().info(f'Added point in pnode {name}: {str(perception)}')
 
         return response.added
@@ -378,13 +387,12 @@ class MainLoop(Node):
 
     def add_antipoint(self, name, sensing):
         service_name = 'pnode/' + str(name) + '/add_point'
-        add_point_client = ServiceClient(AddPoint, service_name)
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(AddPoint, service_name, callback_group=self.cbgroup_client)
+        
         perception = perception_dict_to_msg(sensing)
-
-        response = add_point_client.send_request(point= perception, confidence=-1.0)
-        add_point_client.destroy_node()
-
-        self.get_logger().info(f'Added point in pnode {name}: {str(perception)}')
+        response = self.node_clients[service_name].send_request(point= perception, confidence=-1.0)
+        self.get_logger().info(f'Added anti-point in pnode {name}: {str(perception)}')
         
         return response.added
 
@@ -430,10 +438,9 @@ class MainLoop(Node):
         self.get_logger().info('Requesting node creation')
         params_str=yaml.dump(parameters)
         service_name = 'commander/create'
-        client = ServiceClient(CreateNode, service_name)
-        response = client.send_request(name = name, class_name = class_name, parameters = params_str)
-        client.destroy_node()
-
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(CreateNode, service_name)
+        response = self.node_clients[service_name].send_request(name = name, class_name = class_name, parameters = params_str)
         return response.created        
 
     def reset_world(self):
@@ -465,7 +472,7 @@ class MainLoop(Node):
 
 
 
-    def run(self): 
+    def run(self, _=None): 
         """
         Run the main loop of the system.
         """
@@ -479,12 +486,12 @@ class MainLoop(Node):
         self.reset_world()
         sensing = self.read_perceptions()
         stm=[]
-        while (self.iteration<=self.iterations) and (not self.stop): # TODO: check conditions to continue the loop
-            self.publish_iteration()
+        while (self.iteration<=self.iterations) and (not self.stop): # TODO: check conditions to continue the loop  
 
             if not self.paused:
             
                 self.get_logger().info('*** ITERATION: ' + str(self.iteration) + '/' +str(self.iterations) + ' ***')
+                self.publish_iteration()
                 
                 self.current_policy = self.select_policy(sensing)
                 self.execute_policy(self.current_policy)
@@ -492,7 +499,7 @@ class MainLoop(Node):
 
                 if not self.subgoals:
                     self.current_goal = self.get_current_goal()
-                    self.current_reward=self.get_current_reward(sensing)
+                    self.current_reward= self.get_current_reward(sensing)
                     self.update_pnodes_reward_basis(sensing, self.current_policy, self.current_goal, self.current_reward)
                 else:
                     raise NotImplementedError #TODO: Implement prospection methods
