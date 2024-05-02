@@ -500,7 +500,7 @@ class MainLoop(Node):
                 if not self.subgoals:
                     self.current_goal = self.get_current_goal()
                     self.current_reward= self.get_current_reward(sensing)
-                    self.update_pnodes_reward_basis(sensing, self.current_policy, self.current_goal, self.current_reward)
+                    self.update_pnodes_reward_basis(old_sensing, self.current_policy, self.current_goal, self.current_reward)
                 else:
                     raise NotImplementedError #TODO: Implement prospection methods
                 
