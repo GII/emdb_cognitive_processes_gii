@@ -122,11 +122,11 @@ class MainLoop(Node):
 
         for sensor in self.perception_cache.keys(): #TODO: Consider perception activation when reading
             self.perception_cache[sensor]['flag'].wait()
-            sensing[sensor]=self.perception_cache[sensor]['data']
+            sensing[sensor]=copy(self.perception_cache[sensor]['data'])
             self.perception_cache[sensor]['flag'].clear()
             self.get_logger().debug('Processing perception: '+str(sensor))
 
-        self.get_logger().debug('Perceptions: '+str(sensing))
+        self.get_logger().info('DEBUG Read Perceptions: '+str(sensing))
         return sensing
 
     def receive_perception_callback(self, msg):
@@ -134,9 +134,9 @@ class MainLoop(Node):
         
         for sensor in perception_dict.keys():
             if sensor in self.perception_cache:
-                self.perception_cache[sensor]['data']=perception_dict[sensor]
+                self.perception_cache[sensor]['data']=copy(perception_dict[sensor])
                 self.perception_cache[sensor]['flag'].set() 
-                self.get_logger().debug(f'Receiving perception: {sensor} ...')
+                self.get_logger().debug(f'Receiving perception: {sensor} {self.perception_cache[sensor]["data"]} ...')
             else:
                 self.get_logger().error('Received sensor not registered in local perception cache!!!')
             
@@ -184,7 +184,7 @@ class MainLoop(Node):
             if node['node_type']=='Policy':
                 policy_activations[node['name']]=node['activation']
 
-        self.get_logger().debug('Select_policy - Activations: '+ str(policy_activations))
+        self.get_logger().info('Select_policy - Activations: '+ str(policy_activations))
 
         policy = max(zip(policy_activations.values(), policy_activations.keys()))[1]
 
@@ -248,7 +248,7 @@ class MainLoop(Node):
                 activation=self.request_activation(node['name'], perception)
                 node['activation']=activation
 
-        self.get_logger().info(str(self.LTM_cache))
+        self.get_logger().debug('DEBUG - LTM CACHE:'+str(self.LTM_cache))
 
 
 
@@ -348,8 +348,6 @@ class MainLoop(Node):
         cnodes=[node['name'] for node in policy_neighbors if node['node_type']=='CNode']
         threshold=0.1
 
-        self.get_logger().info(f'DEBUG: CNodes: {cnodes}, Reward: {reward}, threshold: {threshold}')
-
         for cnode in cnodes:
             cnode_neighbors=self.request_neighbors(cnode)
             world_model=next((neighbor['name'] for neighbor in cnode_neighbors if neighbor['node_type']=='WorldModel'))
@@ -380,7 +378,7 @@ class MainLoop(Node):
         
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point= perception, confidence=1.0)
-        self.get_logger().info(f'Added point in pnode {name}: {str(perception)}')
+        self.get_logger().info(f'Added point in pnode {name}: {str(sensing)}')
 
         return response.added
         
@@ -392,7 +390,7 @@ class MainLoop(Node):
         
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point= perception, confidence=-1.0)
-        self.get_logger().info(f'Added anti-point in pnode {name}: {str(perception)}')
+        self.get_logger().info(f'Added anti-point in pnode {name}: {str(sensing)}')
         
         return response.added
 
@@ -496,6 +494,7 @@ class MainLoop(Node):
                 self.current_policy = self.select_policy(sensing)
                 self.execute_policy(self.current_policy)
                 old_sensing, sensing = sensing, self.read_perceptions()
+                self.get_logger().info(f'DEBUG PERCEPTION: \n old_sensing: {old_sensing} \n     sensing: {sensing}')
 
                 if not self.subgoals:
                     self.current_goal = self.get_current_goal()
@@ -531,12 +530,9 @@ class MainLoop(Node):
 def main(args=None):
     rclpy.init()
 
-    #TESTING ONLY
-    params={'iterations':10000, 'trials':10, 'LTM_id':'ltm_0', 'subgoals':False}
-
-    #executor=MultiThreadedExecutor(num_threads=2)
-    executor=SingleThreadedExecutor()
-    main_loop = MainLoop('main_loop',**params)
+    executor=MultiThreadedExecutor(num_threads=2)
+    #executor=SingleThreadedExecutor()
+    main_loop = MainLoop('main_loop')
 
     executor.add_node(main_loop) #Test
     main_loop.get_logger().info('Runnning node')
