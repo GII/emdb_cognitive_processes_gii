@@ -44,7 +44,7 @@ class MainLoop(Node):
         Initializes the MainLoop node and starts the main loop execution.
         """        
         super().__init__(name)
-        self.iteration = 1
+        self.iteration = 0
         self.iterations= 0
         self.trials=0
         self.trial=0
@@ -126,7 +126,7 @@ class MainLoop(Node):
             self.perception_cache[sensor]['flag'].clear()
             self.get_logger().debug('Processing perception: '+str(sensor))
 
-        self.get_logger().info('DEBUG Read Perceptions: '+str(sensing))
+        self.get_logger().debug('DEBUG Read Perceptions: '+str(sensing))
         return sensing
 
     def receive_perception_callback(self, msg):
@@ -243,10 +243,12 @@ class MainLoop(Node):
             if node['node_type']== 'PNode':
                 if new_sensings:
                     activation=self.request_activation(node['name'], perception)
-                    node['activation']=activation
+                    node['activation']=activation if activation > 0.1 else 0
+            elif node['node_type']== 'CNode':
+                pass #CNode activations are handled by the corresponding policies
             else:
                 activation=self.request_activation(node['name'], perception)
-                node['activation']=activation
+                node['activation']=activation if activation > 0.1 else 0
 
         self.get_logger().debug('DEBUG - LTM CACHE:'+str(self.LTM_cache))
 
@@ -365,11 +367,15 @@ class MainLoop(Node):
             ):
                 if reward>threshold:
                     self.add_point(pnode, perception)
+                    return None
                 elif pnode_activation>threshold:
                     self.add_antipoint(pnode, perception)
+                    return None
 
         if (not cnodes) and (reward > threshold):
             self.new_cnode(perception,goal,policy)
+            return None
+        self.get_logger().info('No update required in PNode/CNodes')
 
     def add_point(self, name, sensing):
         service_name = 'pnode/' + str(name) + '/add_point'
@@ -445,7 +451,7 @@ class MainLoop(Node):
         """Reset the world if necessary, according to the experiment parameters."""
         changed = False
         self.trial += 1
-        if self.trial == self.trials or self.current_reward > 0.9 or self.iteration==1:
+        if self.trial == self.trials or self.current_reward > 0.9 or self.iteration==0:
             self.trial = 0
             changed = True
         if ((self.iteration % self.period) == 0):
@@ -484,6 +490,7 @@ class MainLoop(Node):
         self.reset_world()
         sensing = self.read_perceptions()
         stm=[]
+        self.iteration=1
         while (self.iteration<=self.iterations) and (not self.stop): # TODO: check conditions to continue the loop  
 
             if not self.paused:
