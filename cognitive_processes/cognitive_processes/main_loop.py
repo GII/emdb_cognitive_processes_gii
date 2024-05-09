@@ -26,6 +26,7 @@ from core.cognitive_node import CognitiveNode
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict
 
+from core.file import FileGoodness #PROVISIONAL
 
 
 
@@ -63,6 +64,10 @@ class MainLoop(Node):
         self.policies_to_test=[]
         self.current_reward=0
         self.current_world=None
+        self.n_cnodes = 0
+        self.sensorial_changes_val = False
+
+        self.goodness_file = FileGoodness(ident = 'goodness', file_name = 'goodness.txt', node = self) #PROVISIONAL
 
         self.cbgroup_perception=MutuallyExclusiveCallbackGroup()
         self.cbgroup_server=MutuallyExclusiveCallbackGroup()
@@ -232,8 +237,10 @@ class MainLoop(Node):
                 else:
                     if abs(perception[0] - perception_old[0]) > 0.01:
                         self.get_logger().debug('Sensorial change detected')
+                        self.sensorial_changes_val = True
                         return True
         self.get_logger().debug('No sensorial change detected')
+        self.sensorial_changes_val = False
         return False
     
     def update_activations(self, perception, new_sensings=True): 
@@ -314,13 +321,14 @@ class MainLoop(Node):
         
         return goal
     
-    def get_current_reward(self, perception_dict):
+    def get_current_reward(self, old_perception_dict, perception_dict):
         self.get_logger().info('Reading reward...')
+        old_perception = perception_dict_to_msg(old_perception_dict)
         perception = perception_dict_to_msg(perception_dict)
         service_name = 'goal/' + str(self.current_goal) + '/get_reward'
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-        reward = self.node_clients[service_name].send_request(perception=perception)
+        reward = self.node_clients[service_name].send_request(old_perception = old_perception, perception=perception)
 
         self.get_logger().info(f'get_current_reward - Reward {reward.reward}')
 
@@ -348,6 +356,7 @@ class MainLoop(Node):
         self.get_logger().info('Updating p-nodes/c-nodes...')
         policy_neighbors=self.request_neighbors(policy)
         cnodes=[node['name'] for node in policy_neighbors if node['node_type']=='CNode']
+        self.n_cnodes = len(cnodes)
         threshold=0.1
 
         for cnode in cnodes:
@@ -468,9 +477,9 @@ class MainLoop(Node):
 
     def update_status(self): #TODO(efallash): implement
         self.get_logger().info('Writing files publishing status...')
-        pass
-
-
+        if self.goodness_file.file_object is None:
+            self.goodness_file.write_header()
+        self.goodness_file.write()
 
 
 
@@ -505,7 +514,7 @@ class MainLoop(Node):
 
                 if not self.subgoals:
                     self.current_goal = self.get_current_goal()
-                    self.current_reward= self.get_current_reward(sensing)
+                    self.current_reward= self.get_current_reward(old_sensing,sensing)
                     self.update_pnodes_reward_basis(old_sensing, self.current_policy, self.current_goal, self.current_reward)
                 else:
                     raise NotImplementedError #TODO: Implement prospection methods
@@ -525,6 +534,8 @@ class MainLoop(Node):
 
                 self.update_status()
                 self.iteration += 1
+            
+        self.goodness_file.close()
 
             
     
