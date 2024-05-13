@@ -26,7 +26,7 @@ from core.cognitive_node import CognitiveNode
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict
 
-from core.file import FileGoodness #PROVISIONAL
+from core.file import FileGoodness, FilePNodesSuccess #PROVISIONAL
 
 
 
@@ -66,8 +66,11 @@ class MainLoop(Node):
         self.current_world=None
         self.n_cnodes = 0
         self.sensorial_changes_val = False
+        self.pnodes_success = {}
+        self.rng = numpy.random.default_rng(6) #PROVISIONAL
 
         self.goodness_file = FileGoodness(ident = 'goodness', file_name = 'goodness.txt', node = self) #PROVISIONAL
+        self.pnodes_success_file = FilePNodesSuccess(ident = 'pnodes_sucess', file_name = 'pnodes_success.txt', node = self) #PROVISIONAL
 
         self.cbgroup_perception=MutuallyExclusiveCallbackGroup()
         self.cbgroup_server=MutuallyExclusiveCallbackGroup()
@@ -209,7 +212,7 @@ class MainLoop(Node):
         if self.policies_to_test==[]:
             self.policies_to_test = [node['name'] for node in self.LTM_cache if node['node_type']=='Policy']
         
-        policy = random.choice(self.policies_to_test)
+        policy = numpy.random.choice(self.policies_to_test)
 
         return policy
     
@@ -394,7 +397,7 @@ class MainLoop(Node):
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point= perception, confidence=1.0)
         self.get_logger().info(f'Added point in pnode {name}: {str(sensing)}')
-
+        self.pnodes_success[name] = True
         return response.added
         
 
@@ -406,7 +409,7 @@ class MainLoop(Node):
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point= perception, confidence=-1.0)
         self.get_logger().info(f'Added anti-point in pnode {name}: {str(sensing)}')
-        
+        self.pnodes_success[name] = False
         return response.added
 
     def new_cnode(self, perception, goal, policy):
@@ -415,7 +418,7 @@ class MainLoop(Node):
         ident=f'{world_model}__{goal}__{policy}'
 
         #TODO: Obtain class names from config file
-        space_class = 'cognitive_nodes.space.NormalCentroidPointBasedSpace' 
+        space_class = 'cognitive_nodes.space.SVMSpace' 
         pnode_class = 'cognitive_nodes.pnode.PNode' 
         cnode_class = 'cognitive_nodes.cnode.CNode' 
         
@@ -477,9 +480,17 @@ class MainLoop(Node):
 
     def update_status(self): #TODO(efallash): implement
         self.get_logger().info('Writing files publishing status...')
+        self.get_logger().info(f"DEBUG: {self.pnodes_success}")
         if self.goodness_file.file_object is None:
             self.goodness_file.write_header()
         self.goodness_file.write()
+
+        if self.pnodes_success:
+            if self.pnodes_success_file.file_object is None:
+                self.pnodes_success_file.write_header()
+            self.pnodes_success_file.write()
+        
+
 
 
 
@@ -536,6 +547,7 @@ class MainLoop(Node):
                 self.iteration += 1
             
         self.goodness_file.close()
+        self.pnodes_success_file.close()
 
             
     
@@ -559,7 +571,6 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         main_loop.destroy_node()
-
 
 
 
