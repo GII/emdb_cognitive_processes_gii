@@ -5,30 +5,19 @@ from operator import attrgetter
 import random
 import yaml
 import threading
-
 import numpy
 from copy import copy
-import time
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
-#from core_interfaces.srv import SendToLTM
-
 from core.service_client import ServiceClient
-from cognitive_node_interfaces.srv import Execute, GetActivation, GetReward, GetInformation, AddPoint, GetIteration
+from cognitive_node_interfaces.srv import Execute, GetActivation, GetReward, GetInformation, AddPoint
 from cognitive_node_interfaces.msg import Perception
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
 from core_interfaces.msg import ControlMsg
-from std_msgs.msg import Empty
 
-from core.cognitive_node import CognitiveNode
-
-from core.utils import perception_dict_to_msg, perception_msg_to_dict
-
-from core.file import FileGoodness, FilePNodesSuccess #PROVISIONAL
-
-
+from core.utils import perception_dict_to_msg, perception_msg_to_dict, class_from_classname
 
 class MainLoop(Node):
     """
@@ -53,24 +42,24 @@ class MainLoop(Node):
         self.current_policy = None
         self.paused=False
         self.stop=False
-        self.LTM_id = "" #id of LTM currently being run by cognitive loop
-
-        # List of dics, like [{"name": "pnode1", "node_type": "PNode", "activation": 0.0}, {"name": "cnode1", "node_type": "CNode", "activation": 0.0}]
-        self.LTM_cache=[]
+        self.LTM_id = "" #id of LTM currently being run by cognitive loop   
+        self.LTM_cache=[] # List of dics, like [{"name": "pnode1", "node_type": "PNode", "activation": 0.0}, {"name": "cnode1", "node_type": "CNode", "activation": 0.0}]
+        self.default_class={}
         self.perception_suscribers={}
         self.perception_cache={}
         self.reward_threshold= 0.9
         self.subgoals=False
         self.policies_to_test=[]
+        self.files=[]
+        self.default_class={}
+        self.random_seed=0
         self.current_reward=0
         self.current_world=None
         self.n_cnodes = 0
         self.sensorial_changes_val = False
         self.pnodes_success = {}
-        self.rng = numpy.random.default_rng(6) #PROVISIONAL
+        
 
-        self.goodness_file = FileGoodness(ident = 'goodness', file_name = 'goodness.txt', node = self) #PROVISIONAL
-        self.pnodes_success_file = FilePNodesSuccess(ident = 'pnodes_sucess', file_name = 'pnodes_success.txt', node = self) #PROVISIONAL
 
         self.cbgroup_perception=MutuallyExclusiveCallbackGroup()
         self.cbgroup_server=MutuallyExclusiveCallbackGroup()
@@ -80,23 +69,52 @@ class MainLoop(Node):
         self.node_clients={} #Keys are service name, values are service client object e.g. {'cognitive_node/policy0/get_activation: "Object: core.ServiceClient(Async)"'}
 
         self.control_publisher= self.create_publisher(ControlMsg, 'main_loop/control', 10)
-        self.run_subscriber= self.create_subscription(Empty, 'main_loop/run', self.run, 1, callback_group=self.cbgroup_loop)
-
-
-
+        #self.run_subscriber= self.create_subscription(Empty, 'main_loop/run', self.run, 1, callback_group=self.cbgroup_loop) #TODO: Check if it is possible to execute the loop as a callback
 
         for key, value in params.items():
             self.get_logger().debug('Setting atribute: ' + str(key) + ' with value: ' + str(value))
             setattr(self, key, value)
 
+        
+
         #Read LTM and configure perceptions
-        self.read_ltm()
-        self.configure_perceptions()
+        self.setup()
 
         loop_thread = threading.Thread(target=self.run, daemon=True)
         loop_thread.start()
 
-        
+    def setup(self):
+        self.rng = numpy.random.default_rng(self.random_seed) 
+        self.read_ltm()
+        self.configure_perceptions()
+        self.setup_files()
+        self.setup_connectors()
+
+    def read_ltm(self):
+        """
+        Makes an empty call for the LTM get_node service which returns all the nodes 
+        stored in the LTM. Then, a LTM cache dictionary is populated with the data.
+
+        """
+        self.get_logger().info('Reading nodes from LTM: '+ self.LTM_id + '...')
+
+        #Call get_node service from LTM
+        service_name = '/' + str(self.LTM_id) + '/get_node'
+        request=""
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
+        ltm_response = self.node_clients[service_name].send_request(name=request)
+
+        #Process data string
+        ltm_cache=yaml.safe_load(ltm_response.data)
+
+        self.get_logger().debug(f'LTM Dump: {str(ltm_cache)}')
+
+        for node_type in ltm_cache.keys():
+            for node in ltm_cache[node_type].keys():
+                self.LTM_cache.append({'name': node, 'node_type': node_type, 'activation': ltm_cache[node_type][node]['activation']})
+
+        self.get_logger().debug(f'LTM Cache: {str(self.LTM_cache)}')
     
     def configure_perceptions(self): #TODO(efallash): Add condition so that perceptions that are already included do not create a new suscription. For the case that new perceptions are added to the LTM and only some perceptions need to be configured
         """
@@ -118,6 +136,34 @@ class MainLoop(Node):
             self.perception_cache[perception]['flag']=threading.Event()
         #TODO check that all perceptions in the cache still exist in the LTM and destroy suscriptions that are no longer used
         self.get_logger().debug(f'Perception cache: {self.perception_cache}')
+
+    def setup_files(self):
+        if hasattr(self, 'Files'):
+            self.get_logger().info('Files detected, loading files...')
+            for file_item in self.Files:
+                self.add_file(file_item)
+        else:
+            self.get_logger().info('No files detected...')
+
+    def add_file(self, file_item):
+        """Process a file entry (create the corresponding object) in the configuration."""
+        if "data" in file_item:
+            new_file = class_from_classname(file_item["class"])(
+                ident=file_item["id"],
+                file_name=file_item["file"],
+                data=file_item["data"],
+                node=self,
+            )
+        else:
+            new_file = class_from_classname(file_item["class"])(
+                ident=file_item["id"], file_name=file_item["file"], node=self
+            )
+        self.files.append(new_file)
+
+    def setup_connectors(self):
+        if hasattr(self, 'Connectors'):
+            for connector in self.Connectors:
+                self.default_class[connector['data']]=connector.get('default_class')
 
     def publish_iteration(self):
         """
@@ -175,34 +221,6 @@ class MainLoop(Node):
                 self.get_logger().debug(f'Receiving perception: {sensor} {self.perception_cache[sensor]["data"]} ...')
             else:
                 self.get_logger().error('Received sensor not registered in local perception cache!!!')
-            
-
-    def read_ltm(self):
-        """
-        Makes an empty call for the LTM get_node service which returns all the nodes 
-        stored in the LTM. Then, a LTM cache dictionary is populated with the data.
-
-        """
-        self.get_logger().info('Reading nodes from LTM: '+ self.LTM_id + '...')
-
-        #Call get_node service from LTM
-        service_name = '/' + str(self.LTM_id) + '/get_node'
-        request=""
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
-        ltm_response = self.node_clients[service_name].send_request(name=request)
-
-        #Process data string
-        ltm_cache=yaml.safe_load(ltm_response.data)
-
-        self.get_logger().debug(f'LTM Dump: {str(ltm_cache)}')
-
-        for node_type in ltm_cache.keys():
-            for node in ltm_cache[node_type].keys():
-                self.LTM_cache.append({'name': node, 'node_type': node_type, 'activation': ltm_cache[node_type][node]['activation']})
-
-        self.get_logger().debug(f'LTM Cache: {str(self.LTM_cache)}')
-
 
     def ltm_change_callback(self):
         """
@@ -588,10 +606,9 @@ class MainLoop(Node):
         world_model = self.get_current_world_model()
         ident=f'{world_model}__{goal}__{policy}'
 
-        #TODO: Obtain class names from config file
-        space_class = 'cognitive_nodes.space.SVMSpace' 
-        pnode_class = 'cognitive_nodes.pnode.PNode' 
-        cnode_class = 'cognitive_nodes.cnode.CNode' 
+        space_class = self.default_class.get('Space')
+        pnode_class = self.default_class.get('PNode') 
+        cnode_class = self.default_class.get('CNode') 
         
         pnode_name=f'pnode_{ident}'
         pnode = self.create_node_client(
@@ -671,15 +688,16 @@ class MainLoop(Node):
         """
 
         self.get_logger().info('Writing files publishing status...')
-        self.get_logger().info(f"DEBUG: {self.pnodes_success}")
-        if self.goodness_file.file_object is None:
-            self.goodness_file.write_header()
-        self.goodness_file.write()
+        self.get_logger().debug(f"DEBUG: {self.pnodes_success}")
+        for file in self.files:
+            if file.file_object is None:
+                file.write_header()
+            file.write()
 
-        if self.pnodes_success:
-            if self.pnodes_success_file.file_object is None:
-                self.pnodes_success_file.write_header()
-            self.pnodes_success_file.write()
+    def close_files(self):
+        self.get_logger().info('Closing files...')
+        for file in self.files:
+            file.close()
         
     def run(self, _=None): 
         """
@@ -695,7 +713,7 @@ class MainLoop(Node):
         sensing = self.read_perceptions()
         stm=[]
         self.iteration=1
-        while (self.iteration<=self.iterations) and (not self.stop): # TODO: check conditions to continue the loop  
+        while (self.iteration<=self.iterations) and (not self.stop):
 
             if not self.paused:
             
@@ -730,8 +748,7 @@ class MainLoop(Node):
                 self.update_status()
                 self.iteration += 1
             
-        self.goodness_file.close()
-        self.pnodes_success_file.close()
+        self.close_files()
 
 def main(args=None):
     rclpy.init()
