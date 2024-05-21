@@ -563,7 +563,8 @@ class MainLoop(Node):
         
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point= perception, confidence=1.0)
-        self.get_logger().info(f'Added point in pnode {name}: {str(sensing)}')
+        self.get_logger().info(f'Added point in pnode {name}')
+        self.get_logger().debug(f'POINT: {str(sensing)}')
         self.pnodes_success[name] = True
         return response.added
         
@@ -586,7 +587,8 @@ class MainLoop(Node):
         
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point= perception, confidence=-1.0)
-        self.get_logger().info(f'Added anti-point in pnode {name}: {str(sensing)}')
+        self.get_logger().info(f'Added anti-point in pnode {name}')
+        self.get_logger().debug(f'ANTI-POINT: {str(sensing)}')
         self.pnodes_success[name] = False
         return response.added
 
