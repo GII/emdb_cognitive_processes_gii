@@ -77,9 +77,9 @@ Control:
     executed_policy_topic: /mdb/baxter/executed_policy
     executed_policy_msg: std_msgs.msg.String
 ```
-As we can see, we can configure the number of iterations of the experiment, the number of trials that the robot will make before resetting the simulated world or the existence or not of subgoals. Also, it's possible to indicate new_executor as True, so this will indicate to the Commander node that it has to create a new and dedicated execution node for each cognitive node that is created, with the number of threads indicated (2 in this case), although this has more to do with the core of the architecture.
+As we can see, we can configure the number of iterations of the experiment, the number of trials that the robot will make before resetting the simulated world or the existence or not of subgoals. Also, it's possible to configure the param *new_executor* as True, so this will indicate to the Commander node that it has to create a new and dedicated execution node for each cognitive node that is created, with the number of threads indicated (2 in this case), although this has more to do with the [core](https://github.com/GII/emdb_core/blob/main/README.md#configurate-an-experiment) of the architecture.
 
-Finally, there is the control part, which in the example case acts as a middleware between the cognitive architecture and the discrete event simulator, controlling the main loop the communications between both parts. In this case, the main loop publish to the simulator some commands, as the "reset world", the current iteration and the active world model. Also, it indicates to the simulator where the policy to execute will be publish. This can be adapted to another simulator or a real robot case.
+Finally, there is the control part, which in the example case acts as a middleware between the cognitive architecture and the discrete event simulator, controlling the main loop the communications between both parts. In this case, the main loop publishes to the simulator some commands, such as the *reset world*, the current iteration and the active world model. Also, it indicates to the simulator where the policy to execute will be published. This can be adapted to another simulator or a real robot case.
 
 ## Execution
 
