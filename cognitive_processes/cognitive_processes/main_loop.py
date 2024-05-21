@@ -315,6 +315,7 @@ class MainLoop(Node):
                         difference = abs(perception[attribute] - perception_old[attribute])
                         if difference > 0.01:
                             self.get_logger().debug('Sensorial change detected')
+                            self.sensorial_changes_val = True
                             return True
                 else:
                     if abs(perception[0] - perception_old[0]) > 0.01:
@@ -515,7 +516,6 @@ class MainLoop(Node):
         self.get_logger().info('Updating p-nodes/c-nodes...')
         policy_neighbors=self.request_neighbors(policy)
         cnodes=[node['name'] for node in policy_neighbors if node['node_type']=='CNode']
-        self.n_cnodes = len(cnodes)
         threshold=0.1
 
         for cnode in cnodes:
@@ -639,6 +639,7 @@ class MainLoop(Node):
 
         #Update LTMCache with new CNode/PNode. This is a HACK, should be integrated with LTM's changes topic
         self.LTM_cache.append({'name': cnode_name, 'node_type': 'CNode', 'activation': 0})
+        self.n_cnodes = self.n_cnodes + 1 #TODO: Consider the posibility of delete CNodes
 
     def create_node_client(self, name, class_name, parameters={}):
         """
