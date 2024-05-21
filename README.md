@@ -38,7 +38,7 @@ To install this package, it's necessary to clone this repository in a ROS worksp
 colcon build --symlink-install
 ```
 This respository only constitutes the main loop, the reference cognitive process of the e-MDB cognitive architecture. To get full functionality, it's required to add to the ROS workspace, at least, the [emdb_core](https://github.com/GII/emdb_core) repository, that constitutes the base of the architecture, and other packages that include the cognitive nodes, the experiment configuration and the interface that connects the architecture with a real or a simulated environment. Therefore, to use the first version of the architecture implemented by GII, these repositories need to be cloned into the workspace:
-- [_emdb_core_]([https://github.com/GII/emdb_cognitive_nodes_gii](https://github.com/GII/emdb_core)). Core of the cognitive architecture.
+- [_emdb_core_](https://github.com/GII/emdb_core). Core of the cognitive architecture.
 - [_emdb_cognitive_nodes_gii_](https://github.com/GII/emdb_cognitive_nodes_gii). Reference implementation for the main cognitive nodes.
 - [_emdb_discrete_event_simulator_gii_](https://github.com/GII/emdb_discrete_event_simulator_gii). Implementation of a discrete event simulator used in many experiments.
 - [_emdb_experiments_gii_](https://github.com/GII/emdb_experiments_gii). Configuration files for experiments.
@@ -76,10 +76,22 @@ Control:
     control_msg: core_interfaces.msg.ControlMsg
     executed_policy_topic: /mdb/baxter/executed_policy
     executed_policy_msg: std_msgs.msg.String
+LTM:
+    Files:
+        -
+            id: goodness
+            class: core.file.FileGoodness
+            file: goodness.txt
+        -
+            id: pnodes_success
+            class: core.file.FilePNodesSuccess
+            file: pnodes_success.txt
 ```
 As we can see, we can configure the number of iterations of the experiment, the number of trials that the robot will make before resetting the simulated world or the existence or not of subgoals. Also, it's possible to configure the param *new_executor* as True, so this will indicate to the Commander node that it has to create a new and dedicated execution node for each cognitive node that is created, with the number of threads indicated (2 in this case), although this has more to do with the [core](https://github.com/GII/emdb_core/blob/main/README.md#configurate-an-experiment) of the architecture.
 
-Finally, there is the control part, which in the example case acts as a middleware between the cognitive architecture and the discrete event simulator, controlling the main loop the communications between both parts. In this case, the main loop publishes to the simulator some commands, such as the *reset world*, the current iteration and the active world model. Also, it indicates to the simulator where the policy to execute will be published. This can be adapted to another simulator or a real robot case.
+Additionally, there is the control part, which in the example case acts as a middleware between the cognitive architecture and the discrete event simulator, controlling the main loop the communications between both parts. In this case, the main loop publishes to the simulator some commands, such as the *reset world*, the current iteration and the active world model. Also, it indicates to the simulator where the policy to execute will be published. This can be adapted to another simulator or a real robot case.
+
+Finally, the main loop is also the responsible for creating the output files, such as goodness.txt or pnodes_success.txt. In the file.py script in the [_emdb_core_](https://github.com/GII/emdb_core) the file creation can be modified or new files can be created. In the experiment configuration file we can decide the output files that will be written or not.
 
 ## Execution
 
