@@ -59,7 +59,7 @@ The reward obtained could be 0.2, 0.3 or 0.6 if the robot with its action improv
 
 ## Configurate an experiment
 
-It's possible to configure the behavior of the main loop editing the experiment configuration file, stored in the [_emdb_experiments_gii_](https://github.com/GII/emdb_experiments_gii) repository (experiments/default_experiment.yaml) or in an experiments package created by oneself:
+It's possible to configure the behavior of the main loop editing the experiment configuration file, stored in the [_emdb_experiments_gii_](https://github.com/GII/emdb_experiments_gii) repository (experiments/default_experiment.yaml), or one created by oneself:
 ```
 Experiment:
     name: main_loop
