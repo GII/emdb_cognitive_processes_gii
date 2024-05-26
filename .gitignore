@@ -134,6 +134,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/build/
 
 # PyBuilder
 .pybuilder/
@@ -241,6 +242,14 @@ cython_debug/
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+############################
+###                      ###
+### Sphinx documentation ###
+###                      ###
+############################
+
+docs/_build/
 
 #############
 ###       ###
