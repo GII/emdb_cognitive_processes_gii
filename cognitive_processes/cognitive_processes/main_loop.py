@@ -78,7 +78,6 @@ class MainLoop(Node):
         )  # Keys are service name, values are service client object e.g. {'cognitive_node/policy0/get_activation: "Object: core.ServiceClient(Async)"'}
 
         self.control_publisher = self.create_publisher(ControlMsg, "main_loop/control", 10)
-        # self.run_subscriber= self.create_subscription(Empty, 'main_loop/run', self.run, 1, callback_group=self.cbgroup_loop) #TODO: Check if it is possible to execute the loop as a callback
 
         for key, value in params.items():
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
@@ -124,6 +123,7 @@ class MainLoop(Node):
                         "name": node,
                         "node_type": node_type,
                         "activation": ltm_cache[node_type][node]["activation"],
+                        "activation_timestamp": ltm_cache[node_type][node]["activation_timestamp"]
                     }
                 )
 
@@ -680,7 +680,7 @@ class MainLoop(Node):
 
         neighbors = {
             "neighbors": [
-                node
+                {key:value for key, value in node.items() if (key != "activation" and key != "activation_timestamp")}
                 for node in self.LTM_cache
                 if node["name"] in [world_model, goal, policy, pnode_name]
             ]
