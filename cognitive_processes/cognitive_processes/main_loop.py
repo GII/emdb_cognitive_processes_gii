@@ -96,26 +96,20 @@ class MainLoop(Node):
         self.setup_files()
         self.setup_connectors()
 
-    def read_ltm(self):
+    def read_ltm(self, ltm_cache=None):
         """
         Makes an empty call for the LTM get_node service which returns all the nodes
         stored in the LTM. Then, a LTM cache dictionary is populated with the data.
 
         """
         self.get_logger().info("Reading nodes from LTM: " + self.LTM_id + "...")
-
-        # Call get_node service from LTM
-        service_name = "/" + str(self.LTM_id) + "/get_node"
-        request = ""
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
-        ltm_response = self.node_clients[service_name].send_request(name=request)
-
-        # Process data string
-        ltm_cache = yaml.safe_load(ltm_response.data)
-
-        self.get_logger().debug(f"LTM Dump: {str(ltm_cache)}")
-
+        
+        if not ltm_cache:
+            ltm_cache, _ = self.request_ltm()
+            self.get_logger().debug(f"LTM Dump: {str(ltm_cache)}")
+        
+        
+        self.LTM_cache=[]
         for node_type in ltm_cache.keys():
             for node in ltm_cache[node_type].keys():
                 self.LTM_cache.append(
@@ -128,6 +122,18 @@ class MainLoop(Node):
                 )
 
         self.get_logger().debug(f"LTM Cache: {str(self.LTM_cache)}")
+    
+    def request_ltm(self):
+        # Call get_node service from LTM
+        service_name = "/" + str(self.LTM_id) + "/get_node"
+        request = ""
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
+        ltm_response = self.node_clients[service_name].send_request(name=request)
+        ltm = yaml.safe_load(ltm_response.data)
+        updated = ltm_response.updated
+
+        return ltm, updated
 
     def configure_perceptions(
         self,
@@ -367,19 +373,13 @@ class MainLoop(Node):
         """
 
         self.get_logger().info("Updating activations...")
+        updated=False
+        while not updated:
+            ltm, updated = self.request_ltm()
 
-        for node in self.LTM_cache:
-            if node["node_type"] == "PNode":
-                if new_sensings:
-                    activation = self.request_activation(node["name"], perception)
-                    node["activation"] = activation if activation > 0.1 else 0
-            elif node["node_type"] == "CNode":
-                pass  # CNode activations are handled by the corresponding policies
-            else:
-                activation = self.request_activation(node["name"], perception)
-                node["activation"] = activation if activation > 0.1 else 0
-
-        self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+        self.read_ltm(ltm_cache=ltm)
+    
+        self.get_logger().info("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
     def request_activation(self, name, sensing):
         """
