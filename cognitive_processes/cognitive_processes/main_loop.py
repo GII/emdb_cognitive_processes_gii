@@ -10,6 +10,7 @@ from copy import copy
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.time import Time
 
 from core.service_client import ServiceClient
 from cognitive_node_interfaces.srv import (
@@ -112,24 +113,25 @@ class MainLoop(Node):
         self.LTM_cache=[]
         for node_type in ltm_cache.keys():
             for node in ltm_cache[node_type].keys():
+                activation = ltm_cache[node_type][node]["activation"]
                 self.LTM_cache.append(
                     {
                         "name": node,
                         "node_type": node_type,
-                        "activation": ltm_cache[node_type][node]["activation"],
+                        "activation": activation if activation>0.1 else 0,
                         "activation_timestamp": ltm_cache[node_type][node]["activation_timestamp"]
                     }
                 )
 
         self.get_logger().debug(f"LTM Cache: {str(self.LTM_cache)}")
     
-    def request_ltm(self):
+    def request_ltm(self, timestamp=Time()):
         # Call get_node service from LTM
         service_name = "/" + str(self.LTM_id) + "/get_node"
         request = ""
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
-        ltm_response = self.node_clients[service_name].send_request(name=request)
+        ltm_response = self.node_clients[service_name].send_request(name=request, timestamp=timestamp.to_msg())
         ltm = yaml.safe_load(ltm_response.data)
         updated = ltm_response.updated
 
@@ -226,6 +228,12 @@ class MainLoop(Node):
         for (
             sensor
         ) in self.perception_cache.keys():  # TODO: Consider perception activation when reading
+            self.perception_cache[sensor]["flag"].clear()
+            self.get_logger().debug("Clearing flags: " + str(sensor))
+
+        for (
+            sensor
+        ) in self.perception_cache.keys():  # TODO: Consider perception activation when reading
             self.perception_cache[sensor]["flag"].wait()
             sensing[sensor] = copy(self.perception_cache[sensor]["data"])
             self.perception_cache[sensor]["flag"].clear()
@@ -276,7 +284,7 @@ class MainLoop(Node):
         :return: The selected policy.
         :rtype: str
         """
-        self.update_activations(sensing)
+        
 
         policy_activations = {}
         for node in self.LTM_cache:
@@ -362,7 +370,7 @@ class MainLoop(Node):
         self.sensorial_changes_val = False
         return False
 
-    def update_activations(self, perception, new_sensings=True):
+    def update_activations(self, timestamp):
         """
         Requests a new activation to all nodes in the LTM Cache.
 
@@ -375,11 +383,11 @@ class MainLoop(Node):
         self.get_logger().info("Updating activations...")
         updated=False
         while not updated:
-            ltm, updated = self.request_ltm()
+            ltm, updated = self.request_ltm(timestamp=timestamp)
 
         self.read_ltm(ltm_cache=ltm)
     
-        self.get_logger().info("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+        self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
     def request_activation(self, name, sensing):
         """
@@ -773,6 +781,7 @@ class MainLoop(Node):
 
         self.reset_world()
         sensing = self.read_perceptions()
+        timestamp = self.get_clock().now()
         stm = []
         self.iteration = 1
         while (self.iteration <= self.iterations) and (not self.stop):
@@ -784,10 +793,11 @@ class MainLoop(Node):
                 )
                 self.publish_iteration()
 
+                self.update_activations(timestamp)
                 self.current_policy = self.select_policy(sensing)
                 self.execute_policy(self.current_policy)
                 old_sensing, sensing = sensing, self.read_perceptions()
-                self.get_logger().debug(
+                self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {old_sensing} \n     sensing: {sensing}"
                 )
 
@@ -815,7 +825,8 @@ class MainLoop(Node):
                         else None
                     )
                 )
-
+                timestamp = self.get_clock().now()
+                self.get_logger().info(f'ITERATION END: {timestamp.seconds_nanoseconds()}')
                 self.update_status()
                 self.iteration += 1
 
