@@ -20,9 +20,10 @@ from cognitive_node_interfaces.srv import (
     GetInformation,
     AddPoint,
 )
-from cognitive_node_interfaces.msg import Perception, EpisodeMsg
+from cognitive_node_interfaces.msg import Perception
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
-from core_interfaces.msg import ControlMsg
+from cognitive_processes_interfaces.msg import ControlMsg
+from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict, class_from_classname
 
