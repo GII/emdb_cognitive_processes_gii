@@ -34,7 +34,7 @@ class Episode():
         self.policy=''
         self.perception={}
         self.ltm_state={}
-        self.reward=0.0
+        self.reward_list={}
 
 
 class MainLoop(Node):
@@ -776,7 +776,7 @@ class MainLoop(Node):
         msg.policy = self.stm.policy
         msg.perception = perception_dict_to_msg(self.stm.perception)
         msg.ltm_state = yaml.dump(self.stm.ltm_state)
-        msg.reward = self.stm.reward
+        msg.reward_list = yaml.dump(self.stm.reward_list)
         self.episode_publisher.publish(msg)
 
     def run(self, _=None):
@@ -818,11 +818,11 @@ class MainLoop(Node):
 
 
                 self.active_goals = self.get_goals()
-                self.stm.reward= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
+                self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
 
-                #self.publish_episode()
+                self.publish_episode()
 
-                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm.reward)
+                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm.reward_list)
 
 
                 if self.reset_world():

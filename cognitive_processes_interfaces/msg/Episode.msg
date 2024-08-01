@@ -3,4 +3,4 @@ string old_ltm_state
 string policy
 cognitive_node_interfaces/Perception perception
 string ltm_state
-float32 reward
+string reward_list
