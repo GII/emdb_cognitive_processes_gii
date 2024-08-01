@@ -20,11 +20,20 @@ from cognitive_node_interfaces.srv import (
     GetInformation,
     AddPoint,
 )
-from cognitive_node_interfaces.msg import Perception
+from cognitive_node_interfaces.msg import Perception, EpisodeMsg
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
 from core_interfaces.msg import ControlMsg
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict, class_from_classname
+
+class Episode():
+    def __init__(self) -> None:
+        self.old_perception={}
+        self.old_ltm_state={}
+        self.policy=''
+        self.perception={}
+        self.ltm_state={}
+        self.reward=0.0
 
 
 class MainLoop(Node):
@@ -54,6 +63,7 @@ class MainLoop(Node):
         self.LTM_cache = (
             []
         )  # List of dics, like [{"name": "pnode1", "node_type": "PNode", "activation": 0.0}, {"name": "cnode1", "node_type": "CNode", "activation": 0.0}]
+        self.stm = Episode()
         self.default_class = {}
         self.perception_suscribers = {}
         self.perception_cache = {}
@@ -79,6 +89,7 @@ class MainLoop(Node):
         )  # Keys are service name, values are service client object e.g. {'cognitive_node/policy0/get_activation: "Object: core.ServiceClient(Async)"'}
 
         self.control_publisher = self.create_publisher(ControlMsg, "main_loop/control", 10)
+        self.episode_publisher = self.create_publisher(EpisodeMsg, "main_loop/episodes", 10)
 
         for key, value in params.items():
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
@@ -769,6 +780,16 @@ class MainLoop(Node):
         for file in self.files:
             file.close()
 
+    def publish_episode(self):
+        msg=EpisodeMsg()
+        msg.old_perception = perception_dict_to_msg(self.stm.old_perception)
+        msg.old_ltm_state = yaml.dump(self.stm.old_ltm_state)
+        msg.policy = self.stm.policy
+        msg.perception = perception_dict_to_msg(self.stm.perception)
+        msg.ltm_state = yaml.dump(self.stm.ltm_state)
+        msg.reward = self.stm.reward
+        self.episode_publisher.publish(msg)
+
     def run(self, _=None):
         """
         Run the main loop of the system.
@@ -780,9 +801,11 @@ class MainLoop(Node):
         self.current_world = self.get_current_world_model()
 
         self.reset_world()
-        sensing = self.read_perceptions()
         timestamp = self.get_clock().now()
-        stm = []
+        self.stm.perception = self.read_perceptions()
+        self.update_activations(timestamp)
+        self.stm.ltm_state = self.LTM_cache
+        
         self.iteration = 1
         while (self.iteration <= self.iterations) and (not self.stop):
 
@@ -793,35 +816,43 @@ class MainLoop(Node):
                 )
                 self.publish_iteration()
 
-                self.update_activations(timestamp)
-                self.current_policy = self.select_policy(sensing)
+                self.current_policy = self.select_policy(self.stm.perception)
                 self.execute_policy(self.current_policy)
-                old_sensing, sensing = sensing, self.read_perceptions()
+                self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
+                self.stm.old_ltm_state=self.LTM_cache
+                self.update_activations(timestamp)
+                self.stm.ltm_state=self.LTM_cache
+
                 self.get_logger().info(
-                    f"DEBUG PERCEPTION: \n old_sensing: {old_sensing} \n     sensing: {sensing}"
+                    f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
                 )
 
-                if not self.subgoals:
-                    self.current_goal = self.get_current_goal()
-                    self.current_reward = self.get_current_reward(old_sensing, sensing)
-                    self.update_pnodes_reward_basis(
-                        old_sensing, self.current_policy, self.current_goal, self.current_reward
-                    )
-                else:
-                    raise NotImplementedError  # TODO: Implement prospection methods
+
+                self.current_goal = self.get_current_goal()
+                self.stm.reward= self.get_current_reward(self.stm.old_perception, self.stm.perception)
+
+                self.publish_episode()
+
+                self.update_pnodes_reward_basis(
+                    self.stm.old_perception, self.current_policy, self.current_goal, self.stm.reward
+                )
+
 
                 if self.reset_world():
+                    timestamp = self.get_clock().now()
                     reset_sensing = self.read_perceptions()
+                    self.update_activations(timestamp)
 
                     if self.current_reward > self.reward_threshold and self.subgoals:
                         raise NotImplementedError  # TODO: Implement prospection methods
 
-                    sensing = reset_sensing
+                    self.stm.perception = reset_sensing
+                    self.stm.ltm_state = self.LTM_cache
 
                 self.update_policies_to_test(
                     policy=(
                         self.current_policy
-                        if not self.sensorial_changes(sensing, old_sensing)
+                        if not self.sensorial_changes(self.stm.perception, self.stm.old_perception)
                         else None
                     )
                 )
