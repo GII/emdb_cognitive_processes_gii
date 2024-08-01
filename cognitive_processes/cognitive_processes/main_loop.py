@@ -464,54 +464,37 @@ class MainLoop(Node):
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
         policy_response = self.node_clients[service_name].send_request()
         return policy_response.policy
-
-    def get_current_goal(self):
-        """
-        This method selects the goal with the highest activation in the LTM cache.
-
-        :return: Goal with highest activation.
-        :rtype: str
-        """
-
-        self.get_logger().info("Selecting goal with highest activation...")
-
-        goal_activations = {}
+    
+    def get_goals(self):
+        goals = []
         for node in self.LTM_cache:
             if node["node_type"] == "Goal":
-                goal_activations[node["name"]] = node["activation"]
+                if node["activation"] > 0.0:
+                    goals.append(node['name'])
 
-        self.get_logger().info("Selecting current goal - Activations: " + str(goal_activations))
-
-        goal = max(zip(goal_activations.values(), goal_activations.keys()))[1]
-
-        return goal
-
-    def get_current_reward(self, old_sensing, sensing):
-        """
-        This method calls the get reward service of the current goal and
-        returns the reward.
-
-        :param old_sensing: Sensing prior to the performed action.
-        :type old_sensing: dict
-        :param sensing: Sensing after the performed action.
-        :type sensing: dict
-        :return: Current reward.
-        :rtype: float
-        """
-
-        self.get_logger().info("Reading reward...")
+        self.get_logger().info(f"Active Goals: {goals}")
+                    
+        return goals
+    
+    def get_goals_reward(self, old_sensing, sensing):
+        self.get_logger().info("Reading rewards...")
+        rewards = {}
         old_perception = perception_dict_to_msg(old_sensing)
         perception = perception_dict_to_msg(sensing)
-        service_name = "goal/" + str(self.current_goal) + "/get_reward"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-        reward = self.node_clients[service_name].send_request(
-            old_perception=old_perception, perception=perception
-        )
 
-        self.get_logger().info(f"Reading reward - Reward: {reward.reward}")
+        for goal in self.active_goals:
+            service_name = "goal/" + str(goal) + "/get_reward"
+            if service_name not in self.node_clients:
+                self.node_clients[service_name] = ServiceClient(GetReward, service_name)
+            reward = self.node_clients[service_name].send_request(
+                old_perception=old_perception, perception=perception
+            )
+            rewards[goal] = reward.reward
 
-        return reward.reward
+        self.get_logger().info(f"Reward_list: {rewards}")
+
+        return rewards
+
 
     def get_current_world_model(self):
         """
@@ -539,6 +522,11 @@ class MainLoop(Node):
     def get_max_activation_node(self, node_type):  # TODO: Refactor
         # Pending to refactor all get_current_* into a general method
         raise NotImplementedError
+    
+    def update_ltm(self, perception, policy, reward_list):
+        for goal, reward in reward_list.items():
+            self.update_pnodes_reward_basis(perception, policy, goal, reward)
+
 
     def update_pnodes_reward_basis(self, perception, policy, goal, reward):
         """
@@ -828,14 +816,12 @@ class MainLoop(Node):
                 )
 
 
-                self.current_goal = self.get_current_goal()
-                self.stm.reward= self.get_current_reward(self.stm.old_perception, self.stm.perception)
+                self.active_goals = self.get_goals()
+                self.stm.reward= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
 
-                self.publish_episode()
+                #self.publish_episode()
 
-                self.update_pnodes_reward_basis(
-                    self.stm.old_perception, self.current_policy, self.current_goal, self.stm.reward
-                )
+                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm.reward)
 
 
                 if self.reset_world():
@@ -858,7 +844,7 @@ class MainLoop(Node):
                 )
                 timestamp = self.get_clock().now()
                 self.get_logger().info(f'ITERATION END: {timestamp.seconds_nanoseconds()}')
-                self.update_status()
+                #self.update_status()
                 self.iteration += 1
 
         self.close_files()
