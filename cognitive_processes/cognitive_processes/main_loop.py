@@ -777,6 +777,7 @@ class MainLoop(Node):
         msg.perception = perception_dict_to_msg(self.stm.perception)
         msg.ltm_state = yaml.dump(self.stm.ltm_state)
         msg.reward_list = yaml.dump(self.stm.reward_list)
+        msg.timestamp = self.get_clock().now().to_msg()
         self.episode_publisher.publish(msg)
 
     def run(self, _=None):
@@ -806,7 +807,7 @@ class MainLoop(Node):
                 self.publish_iteration()
 
                 self.current_policy = self.select_policy(self.stm.perception)
-                self.execute_policy(self.current_policy)
+                self.stm.policy = self.execute_policy(self.current_policy)
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.stm.old_ltm_state=self.LTM_cache
                 self.update_activations(timestamp)
@@ -845,7 +846,7 @@ class MainLoop(Node):
                 )
                 timestamp = self.get_clock().now()
                 self.get_logger().info(f'ITERATION END: {timestamp.seconds_nanoseconds()}')
-                #self.update_status()
+                self.update_status()
                 self.iteration += 1
 
         self.close_files()
