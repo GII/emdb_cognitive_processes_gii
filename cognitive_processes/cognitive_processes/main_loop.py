@@ -838,7 +838,9 @@ class MainLoop(Node):
         self.reset_world()
         #timestamp = self.get_clock().now()
         self.stm.perception = self.read_perceptions()
-        #self.update_activations(timestamp)
+        self.update_activations(self.get_clock().now())
+        self.active_goals = self.get_goals(self.stm.old_ltm_state)
+        self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
         #self.stm.ltm_state = self.LTM_cache
         
         self.iteration = 1
