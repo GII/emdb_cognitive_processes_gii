@@ -554,12 +554,12 @@ class MainLoop(Node):
         # Pending to refactor all get_current_* into a general method
         raise NotImplementedError
     
-    def update_ltm(self, perception, policy, reward_list):
-        for goal, reward in reward_list.items():
-            self.update_pnodes_reward_basis(perception, policy, goal, reward)
+    def update_ltm(self, perception, policy, stm:Episode):
+        for goal, reward in stm.reward_list.items():
+            self.update_pnodes_reward_basis(perception, policy, goal, reward, stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, perception, policy, goal, reward):
+    def update_pnodes_reward_basis(self, perception, policy, goal, reward, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -615,13 +615,13 @@ class MainLoop(Node):
             )
 
             world_model_activation = next(
-                (node["activation"] for node in self.LTM_cache if node["name"] == world_model)
+                (node["activation"] for node in ltm_cache if node["name"] == world_model)
             )
             goal_activation = next(
-                (node["activation"] for node in self.LTM_cache if node["name"] == goal)
+                (node["activation"] for node in ltm_cache if node["name"] == goal)
             )
             pnode_activation = next(
-                (node["activation"] for node in self.LTM_cache if node["name"] == pnode)
+                (node["activation"] for node in ltm_cache if node["name"] == pnode)
             )
 
             if world_model_activation > threshold and goal_activation > threshold:
@@ -871,7 +871,7 @@ class MainLoop(Node):
 
                 self.publish_episode()
 
-                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm.reward_list)
+                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm)
 
 
                 if self.reset_world():
