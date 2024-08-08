@@ -131,7 +131,7 @@ class MainLoop(Node):
                     {
                         "name": node,
                         "node_type": node_type,
-                        "activation": activation if activation>0.1 else 0,
+                        "activation": activation if activation>0.01 else 0, #Think about a proper threshold for activation. Is this even neccesary?
                         "activation_timestamp": ltm_cache[node_type][node]["activation_timestamp"]
                     }
                 )
@@ -839,7 +839,7 @@ class MainLoop(Node):
         #timestamp = self.get_clock().now()
         self.stm.perception = self.read_perceptions()
         self.update_activations(self.get_clock().now())
-        self.active_goals = self.get_goals(self.stm.old_ltm_state)
+        self.active_goals = self.get_goals(self.LTM_cache)
         self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
         #self.stm.ltm_state = self.LTM_cache
         
