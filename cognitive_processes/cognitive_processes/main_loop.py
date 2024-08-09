@@ -19,6 +19,7 @@ from cognitive_node_interfaces.srv import (
     GetReward,
     GetInformation,
     AddPoint,
+    IsSatisfied
 )
 from cognitive_node_interfaces.msg import Perception
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
@@ -69,6 +70,7 @@ class MainLoop(Node):
         self.perception_suscribers = {}
         self.perception_cache = {}
         self.reward_threshold = 0.9
+        self.activation_threshold = 0.01
         self.subgoals = False
         self.policies_to_test = []
         self.files = []
@@ -130,7 +132,7 @@ class MainLoop(Node):
                     {
                         "name": node,
                         "node_type": node_type,
-                        "activation": activation if activation>0.1 else 0,
+                        "activation": activation if activation > self.activation_threshold else 0, #Think about a proper threshold for activation. Is this even neccesary?
                         "activation_timestamp": ltm_cache[node_type][node]["activation_timestamp"]
                     }
                 )
@@ -297,7 +299,6 @@ class MainLoop(Node):
         :rtype: str
         """
         
-
         policy_activations = {}
         for node in self.LTM_cache:
             if node["node_type"] == "Policy":
@@ -466,9 +467,9 @@ class MainLoop(Node):
         policy_response = self.node_clients[service_name].send_request()
         return policy_response.policy
     
-    def get_goals(self):
+    def get_goals(self, ltm_state):
         goals = []
-        for node in self.LTM_cache:
+        for node in ltm_state:
             if node["node_type"] == "Goal":
                 if node["activation"] > 0.0:
                     goals.append(node['name'])
@@ -519,17 +520,47 @@ class MainLoop(Node):
         WM = max(zip(WM_activations.values(), WM_activations.keys()))[1]
 
         return WM
+    
+    def get_needs(self):
+        needs = []
+        for node in self.LTM_cache:
+            if node["node_type"] == "Need":
+                if node["activation"] > 0.0:
+                    needs.append(node['name'])
+
+        self.get_logger().info(f"Active Needs: {needs}")
+                    
+        return needs
+    
+    def get_need_satisfaction(self, need_list, timestamp):
+        self.get_logger().info("Reading satisfaction...")
+        satisfaction = {}
+        response=IsSatisfied.Response()
+        for need in need_list:
+            service_name = "need/" + str(need) + "/get_satisfaction"
+            if service_name not in self.node_clients:
+                self.node_clients[service_name] = ServiceClient(IsSatisfied, service_name)
+            while not response.updated:
+                response = self.node_clients[service_name].send_request(
+                    timestamp=timestamp.to_msg()
+                )
+            self.get_logger().info(f"DEBUG: {response}")
+            satisfaction[need] = dict(satisfied=response.satisfied, need_type=response.need_type)
+
+        self.get_logger().info(f"Satisfaction list: {satisfaction}")
+
+        return satisfaction
 
     def get_max_activation_node(self, node_type):  # TODO: Refactor
         # Pending to refactor all get_current_* into a general method
         raise NotImplementedError
     
-    def update_ltm(self, perception, policy, reward_list):
-        for goal, reward in reward_list.items():
-            self.update_pnodes_reward_basis(perception, policy, goal, reward)
+    def update_ltm(self, perception, policy, stm:Episode):
+        for goal, reward in stm.reward_list.items():
+            self.update_pnodes_reward_basis(perception, policy, goal, reward, stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, perception, policy, goal, reward):
+    def update_pnodes_reward_basis(self, perception, policy, goal, reward, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -558,7 +589,7 @@ class MainLoop(Node):
         self.get_logger().info("Updating p-nodes/c-nodes...")
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
-        threshold = 0.1
+        threshold = self.activation_threshold
 
         for cnode in cnodes:
             cnode_neighbors = self.request_neighbors(cnode)
@@ -585,13 +616,13 @@ class MainLoop(Node):
             )
 
             world_model_activation = next(
-                (node["activation"] for node in self.LTM_cache if node["name"] == world_model)
+                (node["activation"] for node in ltm_cache if node["name"] == world_model)
             )
             goal_activation = next(
-                (node["activation"] for node in self.LTM_cache if node["name"] == goal)
+                (node["activation"] for node in ltm_cache if node["name"] == goal)
             )
             pnode_activation = next(
-                (node["activation"] for node in self.LTM_cache if node["name"] == pnode)
+                (node["activation"] for node in ltm_cache if node["name"] == pnode)
             )
 
             if world_model_activation > threshold and goal_activation > threshold:
@@ -729,15 +760,22 @@ class MainLoop(Node):
             name=name, class_name=class_name, parameters=params_str
         )
         return response.created
+    
 
-    def reset_world(self):
+
+    def reset_world(self, check_finish=True):
         """
         Reset the world if necessary, according to the experiment parameters.
         """
 
         changed = False
         self.trial += 1
-        if self.trial == self.trials or self.current_reward > 0.9 or self.iteration == 0:
+        if check_finish:
+            finished = self.world_finished()
+        else:
+            finished=False
+
+        if self.trial == self.trials or finished or self.iteration == 0:
             self.trial = 0
             changed = True
         if (self.iteration % self.period) == 0:
@@ -751,6 +789,14 @@ class MainLoop(Node):
             msg.iteration = self.iteration
             self.control_publisher.publish(msg)
         return changed
+    
+    def world_finished(self):
+        need_satisfaction = self.get_need_satisfaction(self.get_needs(), self.get_clock().now())
+        if len(need_satisfaction)>0:
+            finished = all((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
+        else:
+            finished=False
+        return finished
 
     def update_status(self):
         """
@@ -791,10 +837,12 @@ class MainLoop(Node):
         self.current_world = self.get_current_world_model()
 
         self.reset_world()
-        timestamp = self.get_clock().now()
+        #timestamp = self.get_clock().now()
         self.stm.perception = self.read_perceptions()
-        self.update_activations(timestamp)
-        self.stm.ltm_state = self.LTM_cache
+        self.update_activations(self.get_clock().now())
+        self.active_goals = self.get_goals(self.LTM_cache)
+        self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
+        #self.stm.ltm_state = self.LTM_cache
         
         self.iteration = 1
         while (self.iteration <= self.iterations) and (not self.stop):
@@ -805,12 +853,13 @@ class MainLoop(Node):
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.publish_iteration()
-
+                self.update_activations(self.get_clock().now())
                 self.current_policy = self.select_policy(self.stm.perception)
                 self.stm.policy = self.execute_policy(self.current_policy)
+                #timestamp = self.get_clock().now()
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.stm.old_ltm_state=self.LTM_cache
-                self.update_activations(timestamp)
+                self.update_activations(self.get_clock().now())
                 self.stm.ltm_state=self.LTM_cache
 
                 self.get_logger().info(
@@ -818,22 +867,18 @@ class MainLoop(Node):
                 )
 
 
-                self.active_goals = self.get_goals()
+                self.active_goals = self.get_goals(self.stm.old_ltm_state)
                 self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
 
                 self.publish_episode()
 
-                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm.reward_list)
+                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm)
 
 
                 if self.reset_world():
-                    timestamp = self.get_clock().now()
+                    #timestamp = self.get_clock().now()
                     reset_sensing = self.read_perceptions()
-                    self.update_activations(timestamp)
-
-                    if self.current_reward > self.reward_threshold and self.subgoals:
-                        raise NotImplementedError  # TODO: Implement prospection methods
-
+                    self.update_activations(self.get_clock().now())
                     self.stm.perception = reset_sensing
                     self.stm.ltm_state = self.LTM_cache
 
@@ -844,8 +889,8 @@ class MainLoop(Node):
                         else None
                     )
                 )
-                timestamp = self.get_clock().now()
-                self.get_logger().info(f'ITERATION END: {timestamp.seconds_nanoseconds()}')
+                #timestamp = self.get_clock().now()
+                #self.get_logger().info(f'ITERATION END: {timestamp.seconds_nanoseconds()}')
                 self.update_status()
                 self.iteration += 1
 
