@@ -70,6 +70,7 @@ class MainLoop(Node):
         self.perception_suscribers = {}
         self.perception_cache = {}
         self.reward_threshold = 0.9
+        self.activation_threshold = 0.01
         self.subgoals = False
         self.policies_to_test = []
         self.files = []
@@ -131,7 +132,7 @@ class MainLoop(Node):
                     {
                         "name": node,
                         "node_type": node_type,
-                        "activation": activation if activation>0.01 else 0, #Think about a proper threshold for activation. Is this even neccesary?
+                        "activation": activation if activation > self.activation_threshold else 0, #Think about a proper threshold for activation. Is this even neccesary?
                         "activation_timestamp": ltm_cache[node_type][node]["activation_timestamp"]
                     }
                 )
@@ -588,7 +589,7 @@ class MainLoop(Node):
         self.get_logger().info("Updating p-nodes/c-nodes...")
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
-        threshold = 0.1
+        threshold = self.activation_threshold
 
         for cnode in cnodes:
             cnode_neighbors = self.request_neighbors(cnode)
