@@ -328,7 +328,7 @@ class MainLoop(Node):
                 node["name"] for node in self.LTM_cache if node["node_type"] == "Policy"
             ]
 
-        policy = numpy.random.choice(self.policies_to_test)
+        policy = self.rng.choice(self.policies_to_test)
 
         return policy
 
