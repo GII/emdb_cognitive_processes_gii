@@ -544,8 +544,8 @@ class MainLoop(Node):
                 response = self.node_clients[service_name].send_request(
                     timestamp=timestamp.to_msg()
                 )
-            self.get_logger().info(f"DEBUG: {response}")
             satisfaction[need] = dict(satisfied=response.satisfied, need_type=response.need_type)
+            response.updated = False
 
         self.get_logger().info(f"Satisfaction list: {satisfaction}")
 
@@ -556,11 +556,10 @@ class MainLoop(Node):
         raise NotImplementedError
     
     def update_ltm(self, perception, policy, stm:Episode):
-        for goal, reward in stm.reward_list.items():
-            self.update_pnodes_reward_basis(perception, policy, goal, reward, stm.old_ltm_state)
+            self.update_pnodes_reward_basis(perception, policy, copy(stm.reward_list), stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, perception, policy, goal, reward, ltm_cache):
+    def update_pnodes_reward_basis(self, perception, policy, reward_list, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -590,6 +589,7 @@ class MainLoop(Node):
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
         threshold = self.activation_threshold
+        updates = False
 
         for cnode in cnodes:
             cnode_neighbors = self.request_neighbors(cnode)
@@ -626,17 +626,22 @@ class MainLoop(Node):
             )
 
             if world_model_activation > threshold and goal_activation > threshold:
+                reward = reward_list.get(goal, 0.0)
                 if reward > threshold:
+                    reward_list.pop(goal)
                     self.add_point(pnode, perception)
-                    return None
+                    updates = True
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, perception)
-                    return None
+                    updates = True
 
-        if (not cnodes) and (reward > threshold):
-            self.new_cnode(perception, goal, policy)
-            return None
-        self.get_logger().info("No update required in PNode/CNodes")
+        for goal, reward in reward_list.items():
+            if reward > threshold:
+                self.new_cnode(perception, goal, policy)
+                updates = True
+
+        if not updates:
+            self.get_logger().info("No update required in PNode/CNodes")
 
     def add_point(self, name, sensing):
         """
@@ -676,7 +681,7 @@ class MainLoop(Node):
         service_name = "pnode/" + str(name) + "/add_point"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(
-                AddPoint, service_name, callback_group=self.cbgroup_client
+                AddPoint, service_name
             )
 
         perception = perception_dict_to_msg(sensing)
@@ -855,7 +860,8 @@ class MainLoop(Node):
                 self.publish_iteration()
                 self.update_activations(self.get_clock().now())
                 self.current_policy = self.select_policy(self.stm.perception)
-                self.stm.policy = self.execute_policy(self.current_policy)
+                self.current_policy = self.execute_policy(self.current_policy)
+                self.stm.policy = self.current_policy
                 #timestamp = self.get_clock().now()
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.stm.old_ltm_state=self.LTM_cache
