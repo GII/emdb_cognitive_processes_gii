@@ -6,7 +6,7 @@ import random
 import yaml
 import threading
 import numpy
-from copy import copy
+from copy import copy, deepcopy
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -21,10 +21,11 @@ from cognitive_node_interfaces.srv import (
     AddPoint,
     IsSatisfied
 )
-from cognitive_node_interfaces.msg import Perception
+from cognitive_node_interfaces.msg import Perception, Activation
 from core_interfaces.srv import GetNodeFromLTM, CreateNode
 from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
+from std_msgs.msg import String
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict, class_from_classname
 
@@ -63,12 +64,13 @@ class MainLoop(Node):
         self.stop = False
         self.LTM_id = ""  # id of LTM currently being run by cognitive loop
         self.LTM_cache = (
-            []
-        )  # List of dics, like [{"name": "pnode1", "node_type": "PNode", "activation": 0.0}, {"name": "cnode1", "node_type": "CNode", "activation": 0.0}]
+            {}
+        )  # Nested dics, like {'CNode': {'CNode1': {'activation': 0.0}}, 'Drive': {...}, 'Goal': {...}, 'Need': {...}, 'Policy': {...}, 'Perception': {...},'PNode': {...}, 'UtilityModel': {...}, 'WorldModel': {...}}
         self.stm = Episode()
         self.default_class = {}
         self.perception_suscribers = {}
         self.perception_cache = {}
+        self.activation_inputs = {}
         self.reward_threshold = 0.9
         self.activation_threshold = 0.01
         self.subgoals = False
@@ -108,10 +110,11 @@ class MainLoop(Node):
         self.rng = numpy.random.default_rng(self.random_seed)
         self.read_ltm()
         self.configure_perceptions()
+        self.setup_ltm_suscription()
         self.setup_files()
         self.setup_connectors()
 
-    def read_ltm(self, ltm_cache=None):
+    def read_ltm(self, ltm_dump=None):
         """
         Makes an empty call for the LTM get_node service which returns all the nodes
         stored in the LTM. Then, a LTM cache dictionary is populated with the data.
@@ -119,25 +122,48 @@ class MainLoop(Node):
         """
         self.get_logger().info("Reading nodes from LTM: " + self.LTM_id + "...")
         
-        if not ltm_cache:
-            ltm_cache, _ = self.request_ltm()
-            self.get_logger().debug(f"LTM Dump: {str(ltm_cache)}")
+        #Get a LTM dump if not provided
+        if not ltm_dump:
+            ltm_dump, _ = self.request_ltm()
+            self.get_logger().debug(f"LTM Dump: {str(ltm_dump)}")
         
+        #Add missing elements from LTM to LTM Cache
+        for node_type in ltm_dump.keys():
+            if self.LTM_cache.get(node_type, None) is None:
+                self.LTM_cache[node_type] = {}
+            for node in ltm_dump[node_type].keys():
+                if self.LTM_cache[node_type].get(node, None) is None:
+                    self.LTM_cache[node_type][node] = dict(activation = 0.0, activation_timestamp = 0, neighbors = ltm_dump[node_type][node]["neighbors"])
+                    self.create_activation_input(node, node_type)
+                else: #If node exists update data (except activations)
+                    node_data = ltm_dump[node_type][node]
+                    del node_data["activation"]
+                    del node_data["activation_timestamp"]
+                    self.LTM_cache[node_type][node].update(node_data) 
         
-        self.LTM_cache=[]
-        for node_type in ltm_cache.keys():
-            for node in ltm_cache[node_type].keys():
-                activation = ltm_cache[node_type][node]["activation"]
-                self.LTM_cache.append(
-                    {
-                        "name": node,
-                        "node_type": node_type,
-                        "activation": activation if activation > self.activation_threshold else 0, #Think about a proper threshold for activation. Is this even neccesary?
-                        "activation_timestamp": ltm_cache[node_type][node]["activation_timestamp"]
-                    }
-                )
+        #Remove elements in LTM Cache that were removed from LTM.
+        for node_type in self.LTM_cache.keys():
+            for node in self.LTM_cache[node_type]:
+                if ltm_dump[node_type].get(node, None) is None:
+                    del self.LTM_cache[node_type][node]
+                    self.delete_activation_input(node)
 
         self.get_logger().debug(f"LTM Cache: {str(self.LTM_cache)}")
+    
+    def setup_ltm_suscription(self):
+        self.ltm_suscription = self.create_subscription(String, "state", self.ltm_change_callback, 0, callback_group=self.cbgroup_client)
+
+    def ltm_change_callback(self, msg):
+        """
+        PENDING METHOD: This method will read changes made in the LTM
+        external to the cognitive process and update the LTM and perception
+        caches accordingly.
+
+        """
+        self.get_logger().info("Processing change from LTM...")  # TODO(efallash): implement
+        ltm_dump = yaml.safe_load(msg.data)
+        self.read_ltm(ltm_dump=ltm_dump)
+        #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
     
     def request_ltm(self, timestamp=Time()):
         # Call get_node service from LTM
@@ -159,14 +185,11 @@ class MainLoop(Node):
 
         """
         self.get_logger().info("Configuring perceptions...")
-        perceptions = [
-            perception for perception in self.LTM_cache if perception["node_type"] == "Perception"
-        ]
+        perceptions = iter(self.LTM_cache['Perception'].keys())
 
         self.get_logger().debug(f"Perception list: {str(perceptions)}")
 
-        for perception_dict in perceptions:
-            perception = perception_dict["name"]
+        for perception in perceptions:
 
             subscriber = self.create_subscription(
                 Perception,
@@ -279,16 +302,6 @@ class MainLoop(Node):
                     "Received sensor not registered in local perception cache!!!"
                 )
 
-    def ltm_change_callback(self):
-        """
-        PENDING METHOD: This method will read changes made in the LTM
-        external to the cognitive process and update the LTM and perception
-        caches accordingly.
-
-        """
-        self.get_logger().info("Processing change from LTM...")  # TODO(efallash): implement
-        pass
-
     def select_policy(self, sensing):
         """
         Selects the policy with the higher activation based on the current sensing.
@@ -298,20 +311,14 @@ class MainLoop(Node):
         :return: The selected policy.
         :rtype: str
         """
-        
-        policy_activations = {}
-        for node in self.LTM_cache:
-            if node["node_type"] == "Policy":
-                policy_activations[node["name"]] = node["activation"]
+        policy, policy_activations = self.get_max_activation_node("Policy")
 
         self.get_logger().info("Select_policy - Activations: " + str(policy_activations))
-
-        policy = max(zip(policy_activations.values(), policy_activations.keys()))[1]
 
         if not policy_activations[policy]:
             policy = self.random_policy()
 
-        self.get_logger().info(f"Selecting a policy => {policy} ({policy_activations[policy]})")
+        self.get_logger().info(f"Selected policy => {policy} ({policy_activations[policy]})")
 
         return policy
 
@@ -324,9 +331,7 @@ class MainLoop(Node):
         """
 
         if self.policies_to_test == []:
-            self.policies_to_test = [
-                node["name"] for node in self.LTM_cache if node["node_type"] == "Policy"
-            ]
+            self.policies_to_test = list(self.LTM_cache["Policy"].keys())
 
         policy = self.rng.choice(self.policies_to_test)
 
@@ -349,9 +354,7 @@ class MainLoop(Node):
             if policy in self.policies_to_test:
                 self.policies_to_test.remove(policy)
         else:
-            self.policies_to_test = [
-                node["name"] for node in self.LTM_cache if node["node_type"] == "Policy"
-            ]
+            self.policies_to_test = list(self.LTM_cache["Policy"].keys())
 
     def sensorial_changes(self, sensing, old_sensing):
         """
@@ -383,7 +386,7 @@ class MainLoop(Node):
         self.sensorial_changes_val = False
         return False
 
-    def update_activations(self, timestamp):
+    def update_activations(self):
         """
         Requests a new activation to all nodes in the LTM Cache.
 
@@ -392,14 +395,16 @@ class MainLoop(Node):
         :param new_sensings: Indicates if a sensing change has ocurred, defaults to True
         :type new_sensings: bool, optional
         """
-
         self.get_logger().info("Updating activations...")
-        updated=False
-        while not updated:
-            ltm, updated = self.request_ltm(timestamp=timestamp)
+        policies=self.LTM_cache["Policy"].keys()
+        for node in self.activation_inputs:
+            if node in policies:
+                self.activation_inputs[node]['flag'].clear()
 
-        self.read_ltm(ltm_cache=ltm)
-    
+        for node in self.activation_inputs:
+            self.activation_inputs[node]['flag'].wait()
+            self.activation_inputs[node]['flag'].clear()
+
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
     def request_activation(self, name, sensing):
@@ -420,6 +425,38 @@ class MainLoop(Node):
         perception = perception_dict_to_msg(sensing)
         activation = self.node_clients[service_name].send_request(perception=perception)
         return activation.activation
+    
+    def create_activation_input(self, name, node_type): #Adds a node from the activation inputs list.
+        if name not in self.activation_inputs:
+            subscriber=self.create_subscription(Activation, 'cognitive_node/' + str(name) + '/activation', self.read_activation_callback, 1, callback_group=self.cbgroup_server)
+            flag=threading.Event()
+            self.activation_inputs[name]=dict(node_type=node_type, subscriber=subscriber, flag=flag)
+            self.get_logger().debug(f'Created new activation input: {name} of type {node_type}')
+        else:
+            self.get_logger().error(f'Tried to add {name} to activation inputs more than once')
+    
+    def delete_activation_input(self, name): #Deletes a node from the activation inputs list. By default reads activations.
+        if name in self.activation_inputs:
+            self.destroy_subscription(self.activation_inputs[name])
+            self.activation_inputs.pop(name)
+
+    def read_activation_callback(self, msg: Activation):
+        node_name=msg.node_name
+        node_type=msg.node_type
+        activation=msg.activation
+        timestamp=Time.from_msg(msg.timestamp).nanoseconds
+        old_timestamp=self.LTM_cache[node_type][node_name]['activation_timestamp']
+        self.LTM_cache[node_type][node_name]['activation']=activation
+        self.LTM_cache[node_type][node_name]['activation_timestamp']=timestamp
+        
+        if timestamp > old_timestamp:
+            self.activation_inputs[node_name]['flag'].set()
+        elif timestamp < old_timestamp:
+            self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
+        
+        act_file = getattr(self, "act_file", None) #CHANGE THIS
+        if act_file is not None:
+            act_file.receive_activation_callback(msg)
 
     def request_neighbors(self, name):
         """
@@ -431,18 +468,8 @@ class MainLoop(Node):
         :rtype: list
         """
 
-        service_name = "cognitive_node/" + str(name) + "/get_information"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(GetInformation, service_name)
-        information = self.node_clients[service_name].send_request()
-
-        neighbors_names = information.neighbors_name
-        neighbors_types = information.neighbors_type
-
-        neighbors = [
-            {"name": node[0], "node_type": node[1]}
-            for node in zip(neighbors_names, neighbors_types)
-        ]
+        data_dict = self.get_node_data(name, self.LTM_cache)
+        neighbors = data_dict["neighbors"]
 
         self.get_logger().debug(f"REQUESTED NEIGHBORS: {neighbors}")
 
@@ -467,15 +494,8 @@ class MainLoop(Node):
         policy_response = self.node_clients[service_name].send_request()
         return policy_response.policy
     
-    def get_goals(self, ltm_state):
-        goals = []
-        for node in ltm_state:
-            if node["node_type"] == "Goal":
-                if node["activation"] > 0.0:
-                    goals.append(node['name'])
-
-        self.get_logger().info(f"Active Goals: {goals}")
-                    
+    def get_goals(self, ltm_cache):
+        goals = self.get_all_active_nodes("Goal", ltm_cache)
         return goals
     
     def get_goals_reward(self, old_sensing, sensing):
@@ -505,28 +525,13 @@ class MainLoop(Node):
         :return: World model with highest activation.
         :rtype: str
         """
-
-        self.get_logger().info("Selecting world model with highest activation...")
-
-        WM_activations = {}
-        for node in self.LTM_cache:
-            if node["node_type"] == "WorldModel":
-                WM_activations[node["name"]] = node["activation"]
-
-        self.get_logger().info(
-            "Selecting current world model - Activations: " + str(WM_activations)
-        )
-
-        WM = max(zip(WM_activations.values(), WM_activations.keys()))[1]
+        WM, WM_activations = self.get_max_activation_node("WorldModel")
+        self.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
 
         return WM
     
-    def get_needs(self):
-        needs = []
-        for node in self.LTM_cache:
-            if node["node_type"] == "Need":
-                if node["activation"] > 0.0:
-                    needs.append(node['name'])
+    def get_needs(self, ltm_cache):
+        needs = self.get_all_active_nodes("Need", ltm_cache)
 
         self.get_logger().info(f"Active Needs: {needs}")
                     
@@ -551,10 +556,21 @@ class MainLoop(Node):
 
         return satisfaction
 
-    def get_max_activation_node(self, node_type):  # TODO: Refactor
-        # Pending to refactor all get_current_* into a general method
-        raise NotImplementedError
+    def get_max_activation_node(self, node_type):
+        node_activations = {}
+        for node, data in self.LTM_cache[node_type].items():
+            node_activations[node] = data["activation"]
+        self.get_logger().info(f"Selecting most activated {node_type} - Activations: {node_activations}")
+        selected = max(zip(node_activations.values(), node_activations.keys()))[1]
+        return selected, node_activations
     
+    def get_all_active_nodes(self, node_type, ltm_cache):
+        nodes = [name for name in ltm_cache[node_type] if ltm_cache[node_type][name]["activation"] > self.activation_threshold]
+        return nodes
+    
+    def get_node_data(self, node_name, ltm_cache):
+        return next((nodes_dict[node_name] for nodes_dict in ltm_cache.values() if node_name in nodes_dict))
+
     def update_ltm(self, perception, policy, stm:Episode):
             self.update_pnodes_reward_basis(perception, policy, copy(stm.reward_list), stm.old_ltm_state)
 
@@ -615,15 +631,9 @@ class MainLoop(Node):
                 )
             )
 
-            world_model_activation = next(
-                (node["activation"] for node in ltm_cache if node["name"] == world_model)
-            )
-            goal_activation = next(
-                (node["activation"] for node in ltm_cache if node["name"] == goal)
-            )
-            pnode_activation = next(
-                (node["activation"] for node in ltm_cache if node["name"] == pnode)
-            )
+            world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
+            goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
+            pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
 
             if world_model_activation > threshold and goal_activation > threshold:
                 reward = reward_list.get(goal, 0.0)
@@ -715,19 +725,14 @@ class MainLoop(Node):
         pnode = self.create_node_client(
             name=pnode_name, class_name=pnode_class, parameters={"space_class": space_class}
         )
-        # Update LTMCache with new CNode/PNode. This is a HACK, should be integrated with LTM's changes topic
-        self.LTM_cache.append({"name": pnode_name, "node_type": "PNode", "activation": 0})
 
         if not pnode:
             self.get_logger().fatal(f"Failed creation of PNode {pnode_name}")
         self.add_point(pnode_name, perception)
 
+        neighbor_dict = {world_model: "WorldModel", pnode_name: "PNode", goal: "Goal", policy: "Policy"}
         neighbors = {
-            "neighbors": [
-                {key:value for key, value in node.items() if (key != "activation" and key != "activation_timestamp")}
-                for node in self.LTM_cache
-                if node["name"] in [world_model, goal, policy, pnode_name]
-            ]
+            "neighbors": [{"name": node, "node_type": node_type} for node, node_type in neighbor_dict.items()]
         }
 
         cnode_name = f"cnode_{ident}"
@@ -738,8 +743,6 @@ class MainLoop(Node):
         if not cnode:
             self.get_logger().fatal(f"Failed creation of CNode {cnode_name}")
 
-        # Update LTMCache with new CNode/PNode. This is a HACK, should be integrated with LTM's changes topic
-        self.LTM_cache.append({"name": cnode_name, "node_type": "CNode", "activation": 0})
         self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of delete CNodes
 
     def create_node_client(self, name, class_name, parameters={}):
@@ -796,7 +799,7 @@ class MainLoop(Node):
         return changed
     
     def world_finished(self):
-        need_satisfaction = self.get_need_satisfaction(self.get_needs(), self.get_clock().now())
+        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
         if len(need_satisfaction)>0:
             finished = all((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
         else:
@@ -840,16 +843,13 @@ class MainLoop(Node):
         self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
 
         self.current_world = self.get_current_world_model()
-
         self.reset_world()
-        #timestamp = self.get_clock().now()
         self.stm.perception = self.read_perceptions()
-        self.update_activations(self.get_clock().now())
+        self.update_activations()
         self.active_goals = self.get_goals(self.LTM_cache)
         self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
-        #self.stm.ltm_state = self.LTM_cache
-        
         self.iteration = 1
+        
         while (self.iteration <= self.iterations) and (not self.stop):
 
             if not self.paused:
@@ -858,15 +858,13 @@ class MainLoop(Node):
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.publish_iteration()
-                self.update_activations(self.get_clock().now())
+                self.update_activations()
+                self.stm.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(self.stm.perception)
                 self.current_policy = self.execute_policy(self.current_policy)
                 self.stm.policy = self.current_policy
-                #timestamp = self.get_clock().now()
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
-                self.stm.old_ltm_state=self.LTM_cache
-                self.update_activations(self.get_clock().now())
-                self.stm.ltm_state=self.LTM_cache
+                self.stm.ltm_state=deepcopy(self.LTM_cache)
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
@@ -882,9 +880,8 @@ class MainLoop(Node):
 
 
                 if self.reset_world():
-                    #timestamp = self.get_clock().now()
                     reset_sensing = self.read_perceptions()
-                    self.update_activations(self.get_clock().now())
+                    self.update_activations()
                     self.stm.perception = reset_sensing
                     self.stm.ltm_state = self.LTM_cache
 
@@ -895,8 +892,6 @@ class MainLoop(Node):
                         else None
                     )
                 )
-                #timestamp = self.get_clock().now()
-                #self.get_logger().info(f'ITERATION END: {timestamp.seconds_nanoseconds()}')
                 self.update_status()
                 self.iteration += 1
 
