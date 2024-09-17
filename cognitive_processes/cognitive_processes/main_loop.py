@@ -124,7 +124,7 @@ class MainLoop(Node):
         
         #Get a LTM dump if not provided
         if not ltm_dump:
-            ltm_dump, _ = self.request_ltm()
+            ltm_dump = self.request_ltm()
             self.get_logger().debug(f"LTM Dump: {str(ltm_dump)}")
         
         #Add missing elements from LTM to LTM Cache
@@ -165,17 +165,16 @@ class MainLoop(Node):
         self.read_ltm(ltm_dump=ltm_dump)
         #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
     
-    def request_ltm(self, timestamp=Time()):
+    def request_ltm(self):
         # Call get_node service from LTM
         service_name = "/" + str(self.LTM_id) + "/get_node"
         request = ""
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
-        ltm_response = self.node_clients[service_name].send_request(name=request, timestamp=timestamp.to_msg())
+        ltm_response = self.node_clients[service_name].send_request(name=request)
         ltm = yaml.safe_load(ltm_response.data)
-        updated = ltm_response.updated
 
-        return ltm, updated
+        return ltm
 
     def configure_perceptions(
         self,
