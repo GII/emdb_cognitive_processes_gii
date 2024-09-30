@@ -22,7 +22,7 @@ from cognitive_node_interfaces.srv import (
     IsSatisfied
 )
 from cognitive_node_interfaces.msg import Perception, Activation
-from core_interfaces.srv import GetNodeFromLTM, CreateNode
+from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic
 from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
@@ -100,6 +100,8 @@ class MainLoop(Node):
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
             setattr(self, key, value)
 
+        self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
+
         # Read LTM and configure perceptions
         self.setup()
 
@@ -113,6 +115,7 @@ class MainLoop(Node):
         self.setup_ltm_suscription()
         self.setup_files()
         self.setup_connectors()
+        self.LTM_changes_client.send_request(changes_topic=True)
 
     def read_ltm(self, ltm_dump=None):
         """
@@ -160,7 +163,7 @@ class MainLoop(Node):
         caches accordingly.
 
         """
-        self.get_logger().info("Processing change from LTM...")  # TODO(efallash): implement
+        self.get_logger().info("Processing change from LTM...")
         ltm_dump = yaml.safe_load(msg.data)
         self.read_ltm(ltm_dump=ltm_dump)
         #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
