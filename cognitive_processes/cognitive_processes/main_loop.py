@@ -313,16 +313,34 @@ class MainLoop(Node):
         :return: The selected policy.
         :rtype: str
         """
-        policy, policy_activations = self.get_max_activation_node("Policy")
+         
+        if self.policies_to_test == []:
+            self.policies_to_test = list(self.LTM_cache["Policy"].keys())
 
-        self.get_logger().info("Select_policy - Activations: " + str(policy_activations))
+        # This is an UGLY HACK to avoid repetition of policies that yield no reward. Need to evaluate more options.
+        policies_filtered = self.policies_to_test #Policies that have resulted in no perceptual change are filtered from this list
+        policies= self.LTM_cache["Policy"].keys()
 
-        if not policy_activations[policy]:
-            policy = self.random_policy()
+        policy_activations={}
+        all_policy_activations={}
+        for policy in policies_filtered:
+            policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
 
-        self.get_logger().info(f"Selected policy => {policy} ({policy_activations[policy]})")
+        for policy in policies:
+            all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
 
-        return policy
+        selected= max(zip(policy_activations.values(), policy_activations.keys()))[1]
+
+
+        self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
+        self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
+
+        if not policy_activations[selected]:
+            selected = self.random_policy()
+
+        self.get_logger().info(f"Selected policy => {selected} ({policy_activations[selected]})")
+
+        return selected
 
     def random_policy(self):
         """
