@@ -422,6 +422,7 @@ class MainLoop(Node):
                 self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
+            self.get_logger().info(f"DEBUG: WAITING NODE: {node}")
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
 
@@ -516,6 +517,12 @@ class MainLoop(Node):
     
     def get_goals(self, ltm_cache):
         goals = self.get_all_active_nodes("Goal", ltm_cache)
+        
+        #Test
+        goal_act = self.get_node_activations_by_list(goals, ltm_cache)
+        self.get_logger().info(f"DEBUG: Goals activation: {goal_act}")
+        #Test
+        
         return goals
     
     def get_goals_reward(self, old_sensing, sensing):
@@ -584,6 +591,23 @@ class MainLoop(Node):
         selected = max(zip(node_activations.values(), node_activations.keys()))[1]
         return selected, node_activations
     
+    def get_node_activations_by_type(self, node_type, ltm_cache):
+        act_dict={}
+        nodes=ltm_cache[node_type].keys()
+        for node in nodes:
+            act_dict[node]=ltm_cache[node_type][node]["activation"]
+        #Sorts the dictionary by activation from more activated to less activated
+        act_dict = {k: v for k, v in sorted(act_dict.items(), key=lambda item: item[1], reverse=True)}
+        return act_dict
+    
+    def get_node_activations_by_list(self, node_list, ltm_cache):
+        act_dict={}
+        for node in node_list:
+            act_dict[node]=self.get_node_data(node, ltm_cache)["activation"]
+        #Sorts the dictionary by activation from more activated to less activated
+        act_dict = {k: v for k, v in sorted(act_dict.items(), key=lambda item: item[1], reverse=True)}
+        return act_dict
+
     def get_all_active_nodes(self, node_type, ltm_cache):
         nodes = [name for name in ltm_cache[node_type] if ltm_cache[node_type][name]["activation"] > self.activation_threshold]
         return nodes
@@ -624,10 +648,12 @@ class MainLoop(Node):
         self.get_logger().info("Updating p-nodes/c-nodes...")
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
+        cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
         threshold = self.activation_threshold
         updates = False
+        point_added = False
 
-        for cnode in cnodes:
+        for cnode in cnode_activations.keys():
             cnode_neighbors = self.request_neighbors(cnode)
             world_model = next(
                 (
@@ -657,10 +683,12 @@ class MainLoop(Node):
 
             if world_model_activation > threshold and goal_activation > threshold:
                 reward = reward_list.get(goal, 0.0)
-                if reward > threshold:
+                if (reward > threshold):
                     reward_list.pop(goal)
-                    self.add_point(pnode, perception)
-                    updates = True
+                    if not point_added:
+                        self.add_point(pnode, perception)
+                        updates = True
+                        point_added = True
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, perception)
                     updates = True
@@ -885,6 +913,7 @@ class MainLoop(Node):
                 self.stm.policy = self.current_policy
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.stm.ltm_state=deepcopy(self.LTM_cache)
+                self.update_activations()
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
