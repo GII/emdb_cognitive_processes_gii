@@ -106,6 +106,7 @@ class MainLoop(Node):
         self.setup()
 
         loop_thread = threading.Thread(target=self.run, daemon=True)
+        self.semaphore = threading.Semaphore()
         loop_thread.start()
 
     def setup(self):
@@ -163,10 +164,12 @@ class MainLoop(Node):
         caches accordingly.
 
         """
+        self.semaphore.acquire()
         self.get_logger().info("Processing change from LTM...")
         ltm_dump = yaml.safe_load(msg.data)
         self.read_ltm(ltm_dump=ltm_dump)
         #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
+        self.semaphore.release()
     
     def request_ltm(self):
         # Call get_node service from LTM
@@ -416,16 +419,18 @@ class MainLoop(Node):
         :type new_sensings: bool, optional
         """
         self.get_logger().info("Updating activations...")
+        self.semaphore.acquire()
         policies=self.LTM_cache["Policy"].keys()
         for node in self.activation_inputs:
             if node in policies:
                 self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
-            self.get_logger().info(f"DEBUG: WAITING NODE: {node}")
+            if self.iteration<10:
+                self.get_logger().info(f"DEBUG: WAITING NODE: {node}")
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
-
+        self.semaphore.release()
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
     def request_activation(self, name, sensing):
