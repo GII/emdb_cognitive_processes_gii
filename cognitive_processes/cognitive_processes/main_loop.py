@@ -269,7 +269,7 @@ class MainLoop(Node):
         self.get_logger().info("Reading perceptions...")
 
         sensing = {}
-        self.perception_time = self.get_clock().now().nanoseconds + 10000000
+        self.perception_time = self.get_clock().now().nanoseconds + 10000000 #CHANGE THIS
 
         for (
             sensor
@@ -425,7 +425,7 @@ class MainLoop(Node):
         """
         self.get_logger().info("Updating activations...")
         self.semaphore.acquire()
-        self.activation_time=self.get_clock().now().nanoseconds + 10000000
+        self.activation_time=self.get_clock().now().nanoseconds + 10000000 #CHANGE THIS
         for node in self.activation_inputs:
             self.activation_inputs[node]['flag'].clear()
 
@@ -524,12 +524,6 @@ class MainLoop(Node):
     
     def get_goals(self, ltm_cache):
         goals = self.get_all_active_nodes("Goal", ltm_cache)
-        
-        #Test
-        goal_act = self.get_node_activations_by_list(goals, ltm_cache)
-        self.get_logger().info(f"DEBUG: Goals activation: {goal_act}")
-        #Test
-        
         return goals
     
     def get_goals_reward(self, old_sensing, sensing):
