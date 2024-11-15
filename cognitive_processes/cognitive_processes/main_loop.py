@@ -6,6 +6,7 @@ import random
 import yaml
 import threading
 import numpy
+import time
 from copy import copy, deepcopy
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
@@ -21,7 +22,7 @@ from cognitive_node_interfaces.srv import (
     AddPoint,
     IsSatisfied
 )
-from cognitive_node_interfaces.msg import Perception, Activation
+from cognitive_node_interfaces.msg import PerceptionStamped, Activation
 from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic
 from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
@@ -71,6 +72,8 @@ class MainLoop(Node):
         self.perception_suscribers = {}
         self.perception_cache = {}
         self.activation_inputs = {}
+        self.perception_time = 0
+        self.activation_time = 0
         self.reward_threshold = 0.9
         self.activation_threshold = 0.01
         self.subgoals = False
@@ -106,6 +109,7 @@ class MainLoop(Node):
         self.setup()
 
         loop_thread = threading.Thread(target=self.run, daemon=True)
+        self.semaphore = threading.Semaphore()
         loop_thread.start()
 
     def setup(self):
@@ -163,10 +167,12 @@ class MainLoop(Node):
         caches accordingly.
 
         """
+        self.semaphore.acquire()
         self.get_logger().info("Processing change from LTM...")
         ltm_dump = yaml.safe_load(msg.data)
         self.read_ltm(ltm_dump=ltm_dump)
         #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
+        self.semaphore.release()
     
     def request_ltm(self):
         # Call get_node service from LTM
@@ -194,7 +200,7 @@ class MainLoop(Node):
         for perception in perceptions:
 
             subscriber = self.create_subscription(
-                Perception,
+                PerceptionStamped,
                 f"/perception/{perception}/value",
                 self.receive_perception_callback,
                 1,
@@ -263,6 +269,7 @@ class MainLoop(Node):
         self.get_logger().info("Reading perceptions...")
 
         sensing = {}
+        self.perception_time = self.get_clock().now().nanoseconds + 10000000 #CHANGE THIS
 
         for (
             sensor
@@ -290,12 +297,13 @@ class MainLoop(Node):
         :param msg: Message that contains the perception.
         :type msg: cognitive_node_interfaces.msg.Perception
         """
-        perception_dict = perception_msg_to_dict(msg)
+        perception_dict = perception_msg_to_dict(msg.perception)
 
         for sensor in perception_dict.keys():
             if sensor in self.perception_cache:
                 self.perception_cache[sensor]["data"] = copy(perception_dict[sensor])
-                self.perception_cache[sensor]["flag"].set()
+                if Time.from_msg(msg.timestamp).nanoseconds > self.perception_time:
+                    self.perception_cache[sensor]["flag"].set()
                 self.get_logger().debug(
                     f'Receiving perception: {sensor} {self.perception_cache[sensor]["data"]} ...'
                 )
@@ -416,15 +424,15 @@ class MainLoop(Node):
         :type new_sensings: bool, optional
         """
         self.get_logger().info("Updating activations...")
-        policies=self.LTM_cache["Policy"].keys()
+        self.semaphore.acquire()
+        self.activation_time=self.get_clock().now().nanoseconds + 10000000 #CHANGE THIS
         for node in self.activation_inputs:
-            if node in policies:
-                self.activation_inputs[node]['flag'].clear()
+            self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
-
+        self.semaphore.release()
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
     def request_activation(self, name, sensing):
@@ -469,7 +477,7 @@ class MainLoop(Node):
         self.LTM_cache[node_type][node_name]['activation']=activation
         self.LTM_cache[node_type][node_name]['activation_timestamp']=timestamp
         
-        if timestamp > old_timestamp:
+        if timestamp > self.activation_time :            
             self.activation_inputs[node_name]['flag'].set()
         elif timestamp < old_timestamp:
             self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
@@ -525,13 +533,16 @@ class MainLoop(Node):
         perception = perception_dict_to_msg(sensing)
 
         for goal in self.active_goals:
-            service_name = "goal/" + str(goal) + "/get_reward"
-            if service_name not in self.node_clients:
-                self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-            reward = self.node_clients[service_name].send_request(
-                old_perception=old_perception, perception=perception
-            )
-            rewards[goal] = reward.reward
+            updated_reward=False
+            while not updated_reward:
+                service_name = "goal/" + str(goal) + "/get_reward"
+                if service_name not in self.node_clients:
+                    self.node_clients[service_name] = ServiceClient(GetReward, service_name)
+                reward = self.node_clients[service_name].send_request(
+                    old_perception=old_perception, perception=perception
+                )
+                rewards[goal] = reward.reward
+                updated_reward=reward.updated
 
         self.get_logger().info(f"Reward_list: {rewards}")
 
@@ -584,6 +595,23 @@ class MainLoop(Node):
         selected = max(zip(node_activations.values(), node_activations.keys()))[1]
         return selected, node_activations
     
+    def get_node_activations_by_type(self, node_type, ltm_cache):
+        act_dict={}
+        nodes=ltm_cache[node_type].keys()
+        for node in nodes:
+            act_dict[node]=ltm_cache[node_type][node]["activation"]
+        #Sorts the dictionary by activation from more activated to less activated
+        act_dict = {k: v for k, v in sorted(act_dict.items(), key=lambda item: item[1], reverse=True)}
+        return act_dict
+    
+    def get_node_activations_by_list(self, node_list, ltm_cache):
+        act_dict={}
+        for node in node_list:
+            act_dict[node]=self.get_node_data(node, ltm_cache)["activation"]
+        #Sorts the dictionary by activation from more activated to less activated
+        act_dict = {k: v for k, v in sorted(act_dict.items(), key=lambda item: item[1], reverse=True)}
+        return act_dict
+
     def get_all_active_nodes(self, node_type, ltm_cache):
         nodes = [name for name in ltm_cache[node_type] if ltm_cache[node_type][name]["activation"] > self.activation_threshold]
         return nodes
@@ -624,10 +652,12 @@ class MainLoop(Node):
         self.get_logger().info("Updating p-nodes/c-nodes...")
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
+        cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
         threshold = self.activation_threshold
         updates = False
+        point_added = False
 
-        for cnode in cnodes:
+        for cnode in cnode_activations.keys():
             cnode_neighbors = self.request_neighbors(cnode)
             world_model = next(
                 (
@@ -657,17 +687,20 @@ class MainLoop(Node):
 
             if world_model_activation > threshold and goal_activation > threshold:
                 reward = reward_list.get(goal, 0.0)
-                if reward > threshold:
+                if (reward > threshold):
                     reward_list.pop(goal)
-                    self.add_point(pnode, perception)
-                    updates = True
+                    if not point_added:
+                        self.add_point(pnode, perception)
+                        updates = True
+                        point_added = True
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, perception)
                     updates = True
 
         for goal, reward in reward_list.items():
-            if reward > threshold:
+            if (reward > threshold) and (not point_added):
                 self.new_cnode(perception, goal, policy)
+                point_added=True
                 updates = True
 
         if not updates:
@@ -885,6 +918,7 @@ class MainLoop(Node):
                 self.stm.policy = self.current_policy
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.stm.ltm_state=deepcopy(self.LTM_cache)
+                self.update_activations()
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
