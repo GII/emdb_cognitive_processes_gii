@@ -86,6 +86,9 @@ class MainLoop(Node):
         self.n_cnodes = 0
         self.sensorial_changes_val = False
         self.pnodes_success = {}
+        self.goal_count=0
+        self.trials_data=[]
+        self.last_reset=0
 
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
         self.cbgroup_server = MutuallyExclusiveCallbackGroup()
@@ -96,8 +99,6 @@ class MainLoop(Node):
             {}
         )  # Keys are service name, values are service client object e.g. {'cognitive_node/policy0/get_activation: "Object: core.ServiceClient(Async)"'}
 
-        self.control_publisher = self.create_publisher(ControlMsg, "main_loop/control", 10)
-        self.episode_publisher = self.create_publisher(EpisodeMsg, "main_loop/episodes", 10)
 
         for key, value in params.items():
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
@@ -119,6 +120,7 @@ class MainLoop(Node):
         self.setup_ltm_suscription()
         self.setup_files()
         self.setup_connectors()
+        self.setup_control_channel()
         self.LTM_changes_client.send_request(changes_topic=True)
 
     def read_ltm(self, ltm_dump=None):
@@ -240,6 +242,16 @@ class MainLoop(Node):
         if hasattr(self, "Connectors"):
             for connector in self.Connectors:
                 self.default_class[connector["data"]] = connector.get("default_class")
+    
+    def setup_control_channel(self):
+        control_msg=self.Control["control_msg"]
+        episode_msg=self.Control["episodes_msg"]
+        world_reset_msg=self.Control.get("world_reset_msg", None)
+        world_reset_service=self.Control.get("world_reset_service", None)
+        self.control_publisher = self.create_publisher(class_from_classname(control_msg), self.Control["control_topic"], 10)
+        self.episode_publisher = self.create_publisher(class_from_classname(episode_msg), self.Control["episodes_topic"], 10)
+        if world_reset_msg and world_reset_service:
+            self.world_reset_client = ServiceClient(class_from_classname(world_reset_msg), world_reset_service)
 
     def publish_iteration(self):
         """
@@ -269,7 +281,7 @@ class MainLoop(Node):
         self.get_logger().info("Reading perceptions...")
 
         sensing = {}
-        self.perception_time = self.get_clock().now().nanoseconds + 10000000 #CHANGE THIS
+        self.perception_time = self.get_clock().now().nanoseconds
 
         for (
             sensor
@@ -425,7 +437,7 @@ class MainLoop(Node):
         """
         self.get_logger().info("Updating activations...")
         self.semaphore.acquire()
-        self.activation_time=self.get_clock().now().nanoseconds + 10000000 #CHANGE THIS
+        self.activation_time=self.get_clock().now().nanoseconds
         for node in self.activation_inputs:
             self.activation_inputs[node]['flag'].clear()
 
@@ -843,12 +855,22 @@ class MainLoop(Node):
             # TODO: Implement periodic world changes
             pass
         if changed:
-            self.get_logger().info("Asking for a world reset...")
-            msg = ControlMsg()
-            msg.command = "reset_world"
-            msg.world = self.current_world
-            msg.iteration = self.iteration
-            self.control_publisher.publish(msg)
+            if self.iteration>0:
+                iterations=self.iteration-self.last_reset
+                self.trials_data.append((self.goal_count, iterations, finished))
+                self.goal_count+=1
+                self.last_reset=self.iteration
+
+            if getattr(self, "world_reset_client", None):
+                self.get_logger().info("Requesting world reset service...")
+                self.world_reset_client.send_request(iteration=self.iteration, world=self.current_world)
+            else:
+                self.get_logger().info("Asking for a world reset...")
+                msg = ControlMsg()
+                msg.command = "reset_world"
+                msg.world = self.current_world
+                msg.iteration = self.iteration
+                self.control_publisher.publish(msg)
         return changed
     
     def world_finished(self):

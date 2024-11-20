@@ -17,6 +17,7 @@ find_package(cognitive_node_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ControlMsg.msg"
   "msg/Episode.msg"
+  "srv/WorldReset.srv"
   DEPENDENCIES builtin_interfaces cognitive_node_interfaces
 )
 

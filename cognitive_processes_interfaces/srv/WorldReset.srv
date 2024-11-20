@@ -1,0 +1,4 @@
+string world
+int32 iteration
+---
+bool success
