@@ -28,13 +28,14 @@ from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
 
-from core.utils import perception_dict_to_msg, perception_msg_to_dict, class_from_classname
+from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
 
 class Episode():
     def __init__(self) -> None:
         self.old_perception={}
         self.old_ltm_state={}
         self.policy=''
+        self.actuation={}
         self.perception={}
         self.ltm_state={}
         self.reward_list={}
@@ -324,7 +325,7 @@ class MainLoop(Node):
                     "Received sensor not registered in local perception cache!!!"
                 )
 
-    def select_policy(self, sensing):
+    def select_policy(self):
         """
         Selects the policy with the higher activation based on the current sensing.
 
@@ -515,7 +516,7 @@ class MainLoop(Node):
 
         return neighbors
 
-    def execute_policy(self, policy):
+    def execute_policy(self, perception, policy):
         """
         Execute a policy.
 
@@ -531,8 +532,10 @@ class MainLoop(Node):
         service_name = "policy/" + str(policy) + "/execute"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
-        policy_response = self.node_clients[service_name].send_request()
-        return policy_response.policy
+        perc_msg=perception_dict_to_msg(perception)
+        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
+        action= policy_response.action
+        return policy_response.policy, action 
     
     def get_goals(self, ltm_cache):
         goals = self.get_all_active_nodes("Goal", ltm_cache)
@@ -901,10 +904,9 @@ class MainLoop(Node):
     def publish_episode(self):
         msg=EpisodeMsg()
         msg.old_perception = perception_dict_to_msg(self.stm.old_perception)
-        msg.old_ltm_state = yaml.dump(self.stm.old_ltm_state)
         msg.policy = self.stm.policy
+        msg.actuation = self.stm.actuation
         msg.perception = perception_dict_to_msg(self.stm.perception)
-        msg.ltm_state = yaml.dump(self.stm.ltm_state)
         msg.reward_list = yaml.dump(self.stm.reward_list)
         msg.timestamp = self.get_clock().now().to_msg()
         self.episode_publisher.publish(msg)
@@ -935,8 +937,8 @@ class MainLoop(Node):
                 self.publish_iteration()
                 self.update_activations()
                 self.stm.old_ltm_state=deepcopy(self.LTM_cache)
-                self.current_policy = self.select_policy(self.stm.perception)
-                self.current_policy = self.execute_policy(self.current_policy)
+                self.current_policy = self.select_policy()
+                self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
                 self.stm.policy = self.current_policy
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.stm.ltm_state=deepcopy(self.LTM_cache)

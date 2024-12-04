@@ -1,7 +1,6 @@
 cognitive_node_interfaces/Perception old_perception
-string old_ltm_state
 string policy
+cognitive_node_interfaces/Actuation actuation
 cognitive_node_interfaces/Perception perception
-string ltm_state
 string reward_list
 builtin_interfaces/Time timestamp
