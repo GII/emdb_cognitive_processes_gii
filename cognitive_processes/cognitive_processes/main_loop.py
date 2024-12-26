@@ -23,7 +23,7 @@ from cognitive_node_interfaces.srv import (
     IsSatisfied
 )
 from cognitive_node_interfaces.msg import PerceptionStamped, Activation
-from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic
+from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic, UpdateNeighbor
 from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
@@ -443,6 +443,7 @@ class MainLoop(Node):
             self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
+            self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
         self.semaphore.release()
@@ -515,6 +516,13 @@ class MainLoop(Node):
         self.get_logger().debug(f"REQUESTED NEIGHBORS: {neighbors}")
 
         return neighbors
+    
+    def add_neighbor(self, node_name, neighbor_name):
+        service_name=f"{self.LTM_id}/update_neighbor"
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(UpdateNeighbor, service_name)
+        response=self.node_clients[service_name].send_request(node_name=node_name, neighbor_name=neighbor_name, operation=True)
+        return response.success
 
     def execute_policy(self, perception, policy):
         """
@@ -798,7 +806,7 @@ class MainLoop(Node):
             self.get_logger().fatal(f"Failed creation of PNode {pnode_name}")
         self.add_point(pnode_name, perception)
 
-        neighbor_dict = {world_model: "WorldModel", pnode_name: "PNode", goal: "Goal", policy: "Policy"}
+        neighbor_dict = {world_model: "WorldModel", pnode_name: "PNode", goal: "Goal"}
         neighbors = {
             "neighbors": [{"name": node, "node_type": node_type} for node, node_type in neighbor_dict.items()]
         }
@@ -807,8 +815,10 @@ class MainLoop(Node):
         cnode = self.create_node_client(
             name=cnode_name, class_name=cnode_class, parameters=neighbors
         )
+        #Add new C-Node as neighbor of the corresponding policy
+        policy_success=self.add_neighbor(policy, cnode_name) 
 
-        if not cnode:
+        if not cnode or not policy_success:
             self.get_logger().fatal(f"Failed creation of CNode {cnode_name}")
 
         self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of delete CNodes
