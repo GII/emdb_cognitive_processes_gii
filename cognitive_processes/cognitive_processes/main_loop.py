@@ -77,6 +77,7 @@ class MainLoop(Node):
         self.activation_time = 0
         self.reward_threshold = 0.9
         self.activation_threshold = 0.01
+        self.unlinked_drives=[]
         self.subgoals = False
         self.policies_to_test = []
         self.files = []
@@ -85,6 +86,7 @@ class MainLoop(Node):
         self.current_reward = 0
         self.current_world = None
         self.n_cnodes = 0
+        self.n_goals = 0
         self.sensorial_changes_val = False
         self.pnodes_success = {}
         self.goal_count=0
@@ -157,7 +159,9 @@ class MainLoop(Node):
                 if ltm_dump[node_type].get(node, None) is None:
                     del self.LTM_cache[node_type][node]
                     self.delete_activation_input(node)
-
+                    
+        #Check if there are any drives not linked to goals
+        self.unlinked_drives=self.get_unlinked_drives()
         self.get_logger().debug(f"LTM Cache: {str(self.LTM_cache)}")
     
     def setup_ltm_suscription(self):
@@ -549,7 +553,7 @@ class MainLoop(Node):
         goals = self.get_all_active_nodes("Goal", ltm_cache)
         return goals
     
-    def get_goals_reward(self, old_sensing, sensing):
+    def get_goals_reward(self, old_sensing, sensing, ltm_cache):
         self.get_logger().info("Reading rewards...")
         rewards = {}
         old_perception = perception_dict_to_msg(old_sensing)
@@ -567,10 +571,36 @@ class MainLoop(Node):
                 rewards[goal] = reward.reward
                 updated_reward=reward.updated
 
+        #Add rewards obtained from unlinked drives
+        if self.unlinked_drives:
+            active_drives=[drive for drive in self.unlinked_drives if ltm_cache["Drive"][drive]["activation"]>self.activation_threshold]
+            for drive in active_drives:
+                updated_reward=False
+                while not updated_reward:
+                    service_name = "drive/" + str(drive) + "/get_reward"
+                    if service_name not in self.node_clients:
+                        self.node_clients[service_name] = ServiceClient(GetReward, service_name)
+                    reward = self.node_clients[service_name].send_request()
+                    rewards[drive] = reward.reward
+                    updated_reward=reward.updated
         self.get_logger().info(f"Reward_list: {rewards}")
-
         return rewards
 
+    def get_unlinked_drives(self):
+        drives=self.LTM_cache.get("Drive", None)
+        goals=self.LTM_cache.get("Goal", None)
+        if drives:
+            drives_list=list(drives.keys())
+            for goal in goals:
+                neighbors=goals[goal]["neighbors"]
+                for neighbor in neighbors:
+                    if neighbor["name"] in drives_list:
+                        drives_list.remove(neighbor["name"])
+            return drives_list
+        else:
+            return []
+
+        
 
     def get_current_world_model(self):
         """
@@ -642,11 +672,11 @@ class MainLoop(Node):
     def get_node_data(self, node_name, ltm_cache):
         return next((nodes_dict[node_name] for nodes_dict in ltm_cache.values() if node_name in nodes_dict))
 
-    def update_ltm(self, perception, policy, stm:Episode):
-            self.update_pnodes_reward_basis(perception, policy, copy(stm.reward_list), stm.old_ltm_state)
+    def update_ltm(self, stm:Episode):
+            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, perception, policy, reward_list, ltm_cache):
+    def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -713,16 +743,21 @@ class MainLoop(Node):
                 if (reward > threshold):
                     reward_list.pop(goal)
                     if not point_added:
-                        self.add_point(pnode, perception)
+                        self.add_point(pnode, old_perception)
                         updates = True
                         point_added = True
                 elif pnode_activation > threshold:
-                    self.add_antipoint(pnode, perception)
+                    self.add_antipoint(pnode, old_perception)
                     updates = True
 
         for goal, reward in reward_list.items():
             if (reward > threshold) and (not point_added):
-                self.new_cnode(perception, goal, policy)
+                if goal not in self.unlinked_drives:
+                    self.new_cnode(old_perception, goal, policy)
+                else:
+                    drive = goal
+                    goal = self.new_goal(perception, drive)
+                    self.new_cnode(old_perception, goal, policy)
                 point_added=True
                 updates = True
 
@@ -821,7 +856,28 @@ class MainLoop(Node):
         if not cnode or not policy_success:
             self.get_logger().fatal(f"Failed creation of CNode {cnode_name}")
 
-        self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of delete CNodes
+        self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of deleting CNodes
+        return cnode_name
+
+    def new_goal(self, perception, drive):
+        self.get_logger().info("Creating Goal...")
+        goal_name = f"goal_{self.n_goals}"
+        goal_class = self.default_class.get("Goal")
+        space_class = self.default_class.get("Space")
+        neighbors= [{"name": drive, "node_type": "Drive"}]
+        parameters = {
+            "space_class": space_class, 
+            "neighbors": neighbors,
+            "min_confidence": 0.94, #TODO Pass this as parameter from yaml file
+            "ltm_id": self.LTM_id,
+            "perception": perception
+        }
+        goal = self.create_node_client(
+            name=goal_name, class_name=goal_class, parameters=parameters
+        )
+        if not goal:
+            self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
+        return goal_name
 
     def create_node_client(self, name, class_name, parameters={}):
         """
@@ -838,7 +894,7 @@ class MainLoop(Node):
         """
 
         self.get_logger().info("Requesting node creation")
-        params_str = yaml.dump(parameters)
+        params_str = yaml.dump(parameters, sort_keys=False)
         service_name = "commander/create"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(CreateNode, service_name)
@@ -934,7 +990,7 @@ class MainLoop(Node):
         self.stm.perception = self.read_perceptions()
         self.update_activations()
         self.active_goals = self.get_goals(self.LTM_cache)
-        self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
+        self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception, self.LTM_cache)
         self.iteration = 1
         
         while (self.iteration <= self.iterations) and (not self.stop):
@@ -960,11 +1016,11 @@ class MainLoop(Node):
 
 
                 self.active_goals = self.get_goals(self.stm.old_ltm_state)
-                self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception)
+                self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception, self.stm.old_ltm_state)
 
                 self.publish_episode()
 
-                self.update_ltm(self.stm.old_perception, self.current_policy, self.stm)
+                self.update_ltm(self.stm)
 
 
                 if self.reset_world():
