@@ -875,6 +875,7 @@ class MainLoop(Node):
         goal = self.create_node_client(
             name=goal_name, class_name=goal_class, parameters=parameters
         )
+        self.n_goals+=1
         if not goal:
             self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
         return goal_name
