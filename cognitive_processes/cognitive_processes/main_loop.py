@@ -946,7 +946,7 @@ class MainLoop(Node):
     def world_finished(self):
         need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
         if len(need_satisfaction)>0:
-            finished = all((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
+            finished = any((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
         else:
             finished=False
         return finished
