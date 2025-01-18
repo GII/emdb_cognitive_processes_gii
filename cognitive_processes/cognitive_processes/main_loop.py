@@ -539,7 +539,7 @@ class MainLoop(Node):
         :return: The response from executing the policy.
         :rtype: The executed policy.
         """
-        self.get_logger().info("Executing policy " + str(policy) + "...")
+        
 
         service_name = "policy/" + str(policy) + "/execute"
         if service_name not in self.node_clients:
@@ -547,6 +547,7 @@ class MainLoop(Node):
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
         action= policy_response.action
+        self.get_logger().info("Executing policy " + str(policy_response.policy) + "...")
         return policy_response.policy, action 
     
     def get_goals(self, ltm_cache):
@@ -927,7 +928,7 @@ class MainLoop(Node):
         if changed:
             if self.iteration>0:
                 iterations=self.iteration-self.last_reset
-                self.trials_data.append((self.goal_count, iterations, finished))
+                self.trials_data.append((self.iteration, self.goal_count, iterations, finished))
                 self.goal_count+=1
                 self.last_reset=self.iteration
 
