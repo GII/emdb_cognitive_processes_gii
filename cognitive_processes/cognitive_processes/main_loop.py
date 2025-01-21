@@ -88,6 +88,8 @@ class MainLoop(Node):
         self.n_cnodes = 0
         self.n_goals = 0
         self.sensorial_changes_val = False
+        self.softmax_selection = False
+        self.softmax_temperature = 1
         self.pnodes_success = {}
         self.goal_count=0
         self.trials_data=[]
@@ -329,7 +331,7 @@ class MainLoop(Node):
                     "Received sensor not registered in local perception cache!!!"
                 )
 
-    def select_policy(self):
+    def select_policy(self, softmax=False):
         """
         Selects the policy with the higher activation based on the current sensing.
 
@@ -349,12 +351,17 @@ class MainLoop(Node):
         policy_activations={}
         all_policy_activations={}
         for policy in policies_filtered:
-            policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
+            act=self.LTM_cache["Policy"][policy]["activation"]
+            if act>self.activation_threshold: #Filters out non-activated policies
+                policy_activations[policy]=act
 
         for policy in policies:
             all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
 
-        selected= max(zip(policy_activations.values(), policy_activations.keys()))[1]
+        if softmax:
+            selected = self.select_policy_softmax(policy_activations, self.softmax_temperature)
+        else: 
+            selected= self.select_max_policy(policy_activations)
 
 
         self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
@@ -365,6 +372,26 @@ class MainLoop(Node):
 
         self.get_logger().info(f"Selected policy => {selected} ({policy_activations[selected]})")
 
+        return selected
+    
+    def select_max_policy(self, policy_activations:dict):
+        selected= max(zip(policy_activations.values(), policy_activations.keys()))[1]
+        return selected
+    
+    def select_policy_softmax(self, policy_activations:dict, temperature=1):
+        # Convert activations to a numpy array for softmax computation
+        activations = numpy.array(list(policy_activations.values()))
+        policy_names = list(policy_activations.keys())
+
+        # Compute softmax probabilities
+        scaled_activations=activations/temperature
+        exp_activations = numpy.exp(scaled_activations - numpy.max(scaled_activations))  # Subtract max for numerical stability
+        probabilities = exp_activations / numpy.sum(exp_activations)
+        policy_probabilities = {policy: prob for policy, prob in zip(policy_names, probabilities)}
+
+        # Select a policy based on the probabilities
+        selected = self.rng.choice(policy_names, p=probabilities)
+        self.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
         return selected
 
     def random_policy(self):
@@ -547,7 +574,7 @@ class MainLoop(Node):
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
         action= policy_response.action
-        self.get_logger().info("Executing policy " + str(policy_response.policy) + "...")
+        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, action 
     
     def get_goals(self, ltm_cache):
@@ -1005,7 +1032,7 @@ class MainLoop(Node):
                 self.publish_iteration()
                 self.update_activations()
                 self.stm.old_ltm_state=deepcopy(self.LTM_cache)
-                self.current_policy = self.select_policy()
+                self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
                 self.stm.policy = self.current_policy
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
