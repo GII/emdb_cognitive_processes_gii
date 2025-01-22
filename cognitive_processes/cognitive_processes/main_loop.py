@@ -23,7 +23,7 @@ from cognitive_node_interfaces.srv import (
     IsSatisfied
 )
 from cognitive_node_interfaces.msg import PerceptionStamped, Activation
-from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic, UpdateNeighbor
+from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic, UpdateNeighbor, StopExecution
 from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
@@ -127,6 +127,7 @@ class MainLoop(Node):
         self.setup_connectors()
         self.setup_control_channel()
         self.LTM_changes_client.send_request(changes_topic=True)
+        self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
 
     def read_ltm(self, ltm_dump=None):
         """
@@ -1069,6 +1070,7 @@ class MainLoop(Node):
                 self.iteration += 1
 
         self.close_files()
+        self.kill_commander_client.send_request()
 
 
 def main(args=None):
