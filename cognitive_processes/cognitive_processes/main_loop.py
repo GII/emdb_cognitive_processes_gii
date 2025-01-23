@@ -897,6 +897,7 @@ class MainLoop(Node):
         parameters = {
             "space_class": space_class, 
             "neighbors": neighbors,
+            "history_size": 300, #TODO Pass this as parameter from yaml file
             "min_confidence": 0.94, #TODO Pass this as parameter from yaml file
             "ltm_id": self.LTM_id,
             "perception": perception
