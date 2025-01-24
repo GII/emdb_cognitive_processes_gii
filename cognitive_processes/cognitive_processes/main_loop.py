@@ -64,6 +64,7 @@ class MainLoop(Node):
         self.current_policy = None
         self.paused = False
         self.stop = False
+        self.kill_on_finish = False
         self.LTM_id = ""  # id of LTM currently being run by cognitive loop
         self.LTM_cache = (
             {}
@@ -1071,7 +1072,8 @@ class MainLoop(Node):
                 self.iteration += 1
 
         self.close_files()
-        self.kill_commander_client.send_request()
+        if self.kill_on_finish:
+            self.kill_commander_client.send_request()
 
 
 def main(args=None):
