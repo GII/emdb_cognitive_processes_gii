@@ -1,0 +1,6 @@
+cognitive_node_interfaces/Perception old_perception
+string policy
+cognitive_node_interfaces/Actuation actuation
+cognitive_node_interfaces/Perception perception
+string reward_list
+builtin_interfaces/Time timestamp
