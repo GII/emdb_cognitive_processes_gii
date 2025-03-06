@@ -1039,8 +1039,8 @@ class MainLoop(Node):
                 self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
                 self.stm.policy = self.current_policy
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
-                self.stm.ltm_state=deepcopy(self.LTM_cache)
                 self.update_activations()
+                self.stm.ltm_state=deepcopy(self.LTM_cache)
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
