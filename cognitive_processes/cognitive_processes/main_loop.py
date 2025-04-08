@@ -359,20 +359,26 @@ class MainLoop(Node):
 
         for policy in policies:
             all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
+        self.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
+        self.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
+        if not policy_activations:
+            policy_pool = all_policy_activations
+        else:
+            policy_pool = policy_activations
 
         if softmax:
-            selected = self.select_policy_softmax(policy_activations, self.softmax_temperature)
+            selected = self.select_policy_softmax(policy_pool, self.softmax_temperature)
         else: 
-            selected= self.select_max_policy(policy_activations)
+            selected= self.select_max_policy(policy_pool)
 
 
         self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
         self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
-        if not policy_activations[selected]:
+        if not policy_pool[selected]:
             selected = self.random_policy()
 
-        self.get_logger().info(f"Selected policy => {selected} ({policy_activations[selected]})")
+        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
 
         return selected
     
