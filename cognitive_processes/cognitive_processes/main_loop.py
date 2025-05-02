@@ -709,10 +709,10 @@ class MainLoop(Node):
         return next((nodes_dict[node_name] for nodes_dict in ltm_cache.values() if node_name in nodes_dict))
 
     def update_ltm(self, stm:Episode):
-            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
+            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.actuation, stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
+    def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, actuation, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -773,8 +773,11 @@ class MainLoop(Node):
             world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
             goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
             pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
+            cnode_params = self.get_node_data(cnode, ltm_cache)['policy_params'].get('policy_params', [{}])[0]
+            policy_params = actuation_msg_to_dict(actuation).get('policy_params', [{}])[0] 
+             
 
-            if world_model_activation > threshold and goal_activation > threshold:
+            if world_model_activation > threshold and goal_activation > threshold and cnode_params == policy_params:
                 reward = reward_list.get(goal, 0.0)
                 if (reward > threshold):
                     reward_list.pop(goal)
@@ -789,11 +792,11 @@ class MainLoop(Node):
         for goal, reward in reward_list.items():
             if (reward > threshold) and (not point_added):
                 if goal not in self.unlinked_drives:
-                    self.new_cnode(old_perception, goal, policy)
+                    self.new_cnode(old_perception, goal, policy, actuation)
                 else:
                     drive = goal
                     goal = self.new_goal(perception, drive)
-                    self.new_cnode(old_perception, goal, policy)
+                    self.new_cnode(old_perception, goal, policy, actuation)
                 point_added=True
                 updates = True
 
@@ -848,7 +851,7 @@ class MainLoop(Node):
         self.pnodes_success[name] = False
         return response.added
 
-    def new_cnode(self, perception, goal, policy):
+    def new_cnode(self, perception, goal, policy, actuation):
         """
         This method creates a new CNode/PNode pair.
 
@@ -882,9 +885,12 @@ class MainLoop(Node):
             "neighbors": [{"name": node, "node_type": node_type} for node, node_type in neighbor_dict.items()]
         }
 
+        policy_parameter = {"policy_params": actuation_msg_to_dict(actuation)}
+        params = {**neighbors, **policy_parameter}
+
         cnode_name = f"cnode_{ident}"
         cnode = self.create_node_client(
-            name=cnode_name, class_name=cnode_class, parameters=neighbors
+            name=cnode_name, class_name=cnode_class, parameters=params
         )
         #Add new C-Node as neighbor of the corresponding policy
         policy_success=self.add_neighbor(policy, cnode_name) 
