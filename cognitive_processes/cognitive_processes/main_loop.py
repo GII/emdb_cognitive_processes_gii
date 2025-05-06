@@ -150,11 +150,23 @@ class MainLoop(Node):
             for node in ltm_dump[node_type].keys():
                 if self.LTM_cache[node_type].get(node, None) is None:
                     self.LTM_cache[node_type][node] = dict(activation = 0.0, activation_timestamp = 0, neighbors = ltm_dump[node_type][node]["neighbors"])
+                    if "policy_params" in ltm_dump[node_type][node]:
+                        self.get_logger().info(f"DEBUG - CNODE {node} policy_params: {ltm_dump[node_type][node]['policy_params']}")
+                        if isinstance(ltm_dump[node_type][node]["policy_params"], dict):
+                            self.LTM_cache[node_type][node]["policy_params"]=ltm_dump[node_type][node]["policy_params"]
+                        else:
+                            self.LTM_cache[node_type][node]["policy_params"]={}
                     self.create_activation_input(node, node_type)
                 else: #If node exists update data (except activations)
                     node_data = ltm_dump[node_type][node]
                     del node_data["activation"]
                     del node_data["activation_timestamp"]
+                    policy_params = node_data.pop("policy_params", None)
+                    if policy_params is not None:
+                        if isinstance(policy_params, dict):
+                            self.LTM_cache[node_type][node]["policy_params"]=policy_params
+                        else:
+                            self.LTM_cache[node_type][node]["policy_params"]={}
                     self.LTM_cache[node_type][node].update(node_data) 
         
         #Remove elements in LTM Cache that were removed from LTM.
@@ -581,8 +593,8 @@ class MainLoop(Node):
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        action= policy_response.action
-        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
+        action = policy_response.action
+        self.get_logger().info("Executed policy " + str(policy_response.policy) + " with action " + str(action))
         return policy_response.policy, action 
     
     def get_goals(self, ltm_cache):
@@ -773,7 +785,8 @@ class MainLoop(Node):
             world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
             goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
             pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
-            cnode_params = self.get_node_data(cnode, ltm_cache)['policy_params'].get('policy_params', [{}])[0]
+            cnode_data = self.get_node_data(cnode, ltm_cache)
+            cnode_params = cnode_data['policy_params'].get('policy_params', [{}])[0]
             policy_params = actuation_msg_to_dict(actuation).get('policy_params', [{}])[0] 
              
 
@@ -866,12 +879,17 @@ class MainLoop(Node):
         self.get_logger().info("Creating Cnode...")
         world_model = self.get_current_world_model()
         ident = f"{world_model}__{goal}__{policy}"
+        index=0
+        while True:
+            if f"cnode_{ident}_{index}" not in self.LTM_cache["CNode"]:
+                break
+            index+=1
 
         space_class = self.default_class.get("Space")
         pnode_class = self.default_class.get("PNode")
         cnode_class = self.default_class.get("CNode")
 
-        pnode_name = f"pnode_{ident}"
+        pnode_name = f"pnode_{ident}_{index}"
         pnode = self.create_node_client(
             name=pnode_name, class_name=pnode_class, parameters={"space_class": space_class}
         )
@@ -888,7 +906,7 @@ class MainLoop(Node):
         policy_parameter = {"policy_params": actuation_msg_to_dict(actuation)}
         params = {**neighbors, **policy_parameter}
 
-        cnode_name = f"cnode_{ident}"
+        cnode_name = f"cnode_{ident}_{index}"
         cnode = self.create_node_client(
             name=cnode_name, class_name=cnode_class, parameters=params
         )
@@ -977,13 +995,12 @@ class MainLoop(Node):
             if getattr(self, "world_reset_client", None):
                 self.get_logger().info("Requesting world reset service...")
                 self.world_reset_client.send_request(iteration=self.iteration, world=self.current_world)
-            else:
-                self.get_logger().info("Asking for a world reset...")
-                msg = ControlMsg()
-                msg.command = "reset_world"
-                msg.world = self.current_world
-                msg.iteration = self.iteration
-                self.control_publisher.publish(msg)
+            self.get_logger().info("Asking for a world reset...")
+            msg = ControlMsg()
+            msg.command = "reset_world"
+            msg.world = self.current_world
+            msg.iteration = self.iteration
+            self.control_publisher.publish(msg)
         return changed
     
     def world_finished(self):
@@ -1071,7 +1088,7 @@ class MainLoop(Node):
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
                     self.stm.perception = reset_sensing
-                    self.stm.ltm_state = self.LTM_cache
+                    self.stm.ltm_state = deepcopy(self.LTM_cache)
 
                 self.update_policies_to_test(
                     policy=(
