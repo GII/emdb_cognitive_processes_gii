@@ -31,6 +31,9 @@ from std_msgs.msg import String
 from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
 
 class Episode():
+    """
+    Episode class used as STM (Short Term Memory) for the cognitive architecture.
+    """
     def __init__(self) -> None:
         self.old_perception={}
         self.old_ltm_state={}
@@ -52,8 +55,10 @@ class MainLoop(Node):
     def __init__(self, name, **params):
         """
         Constructor for the MainLoop class.
-
         Initializes the MainLoop node and starts the main loop execution.
+
+        :param name: The name of the MainLoop node.
+        :type name: str
         """
         super().__init__(name)
         self.iteration = 0
@@ -120,6 +125,10 @@ class MainLoop(Node):
         loop_thread.start()
 
     def setup(self):
+        """
+        Initial configuration of the MainLoop node.
+        This method sets up the LTM, perceptions, files, connectors, control channel, etc.
+        """
         self.rng = numpy.random.default_rng(self.random_seed)
         self.read_ltm()
         self.configure_perceptions()
@@ -135,6 +144,8 @@ class MainLoop(Node):
         Makes an empty call for the LTM get_node service which returns all the nodes
         stored in the LTM. Then, a LTM cache dictionary is populated with the data.
 
+        :param ltm_dump: Optional LTM dump to be used instead of requesting it from the current one.
+        :type ltm_dump: dict
         """
         self.get_logger().info("Reading nodes from LTM: " + self.LTM_id + "...")
         
@@ -169,6 +180,9 @@ class MainLoop(Node):
         self.get_logger().debug(f"LTM Cache: {str(self.LTM_cache)}")
     
     def setup_ltm_suscription(self):
+        """
+        Sets up a subscription to the LTM state topic.
+        """
         self.ltm_suscription = self.create_subscription(String, "state", self.ltm_change_callback, 0, callback_group=self.cbgroup_client)
 
     def ltm_change_callback(self, msg):
@@ -177,6 +191,8 @@ class MainLoop(Node):
         external to the cognitive process and update the LTM and perception
         caches accordingly.
 
+        :param msg: Message containing the LTM dump.
+        :type msg: std_msgs.msg.String
         """
         self.semaphore.acquire()
         self.get_logger().info("Processing change from LTM...")
@@ -186,6 +202,12 @@ class MainLoop(Node):
         self.semaphore.release()
     
     def request_ltm(self):
+        """
+        Requests the LTM dump from its service.
+
+        :return: LTM dump as a dictionary.
+        :rtype: dict
+        """
         # Call get_node service from LTM
         service_name = "/" + str(self.LTM_id) + "/get_node"
         request = ""
@@ -201,7 +223,6 @@ class MainLoop(Node):
     ):  # TODO(efallash): Add condition so that perceptions that are already included do not create a new suscription. For the case that new perceptions are added to the LTM and only some perceptions need to be configured
         """
         Reads the LTM cache and populates the perception subscribers and perception cache dictionaries.
-
         """
         self.get_logger().info("Configuring perceptions...")
         perceptions = iter(self.LTM_cache['Perception'].keys())
@@ -225,6 +246,9 @@ class MainLoop(Node):
         self.get_logger().debug(f"Perception cache: {self.perception_cache}")
 
     def setup_files(self):
+        """
+        Configures the output files.
+        """ 
         if hasattr(self, "Files"):
             self.get_logger().info("Files detected, loading files...")
             for file_item in self.Files:
@@ -233,7 +257,12 @@ class MainLoop(Node):
             self.get_logger().info("No files detected...")
 
     def add_file(self, file_item):
-        """Process a file entry (create the corresponding object) in the configuration."""
+        """
+        Process a file entry (create the corresponding object) in the configuration.
+
+        :param file_item: Dictionary with the file information.
+        :type file_item: dict
+        """
         if "data" in file_item:
             new_file = class_from_classname(file_item["class"])(
                 ident=file_item["id"],
@@ -248,11 +277,17 @@ class MainLoop(Node):
         self.files.append(new_file)
 
     def setup_connectors(self):
+        """
+        Configures the default classes for the cognitive nodes.
+        """
         if hasattr(self, "Connectors"):
             for connector in self.Connectors:
                 self.default_class[connector["data"]] = connector.get("default_class")
     
     def setup_control_channel(self):
+        """
+        Configures the control channel.
+        """
         control_msg=self.Control["control_msg"]
         episode_msg=self.Control["episodes_msg"]
         world_reset_msg=self.Control.get("world_reset_msg", None)
@@ -265,7 +300,6 @@ class MainLoop(Node):
     def publish_iteration(self):
         """
         Method for publishing execution data in the control topic in each iteration.
-
         """
         msg = ControlMsg()
         msg.command = ""
@@ -283,7 +317,7 @@ class MainLoop(Node):
 
         When the whole cache is processed, the sensing dictionary is returned.
 
-        :return: Latest sensing
+        :return: Latest sensing.
         :rtype: dict
         """
 
@@ -335,10 +369,12 @@ class MainLoop(Node):
 
     def select_policy(self, softmax=False):
         """
-        Selects the policy with the higher activation based on the current sensing.
+        Selects the policy with the higher activation.
+        If softmax is True, it selects the policy using a softmax function.
+        If no policy is selected, it selects a random policy.
 
-        :param sensing: The current sensing.
-        :type sensing: dict
+        :param softmax: If True, selects the policy using a softmax function, defaults to False.
+        :type softmax: bool
         :return: The selected policy.
         :rtype: str
         """
@@ -383,10 +419,28 @@ class MainLoop(Node):
         return selected
     
     def select_max_policy(self, policy_activations:dict):
+        """
+        Selects the policy with the maximum activation.
+
+        :param policy_activations: Dictionary with policy names as keys and their activations as values.
+        :type policy_activations: dict
+        :return: The name of the policy with the maximum activation.
+        :rtype: str
+        """
         selected= max(zip(policy_activations.values(), policy_activations.keys()))[1]
         return selected
     
     def select_policy_softmax(self, policy_activations:dict, temperature=1):
+        """
+        Selects a policy using the softmax function.
+
+        :param policy_activations: Dictionary with policy names as keys and their activations as values.
+        :type policy_activations: dict
+        :param temperature: Temperature parameter for the softmax function, defaults to 1.
+        :type temperature: int
+        :return: The name of the selected policy.
+        :rtype: str
+        """
         # Convert activations to a numpy array for softmax computation
         activations = numpy.array(list(policy_activations.values()))
         policy_names = list(policy_activations.keys())
@@ -406,7 +460,7 @@ class MainLoop(Node):
         """
         Selects a random policy.
 
-        :return: The selected policy
+        :return: The selected policy.
         :rtype: str
         """
 
@@ -426,8 +480,8 @@ class MainLoop(Node):
 
         When a policy is passed, the policy will be removed from the policies to test list.
 
-        :param policy: Optional policy name, defaults to None
-        :type policy: str, optional
+        :param policy: Policy to be removed, defaults to None.
+        :type policy: str
         """
 
         if policy:
@@ -468,13 +522,9 @@ class MainLoop(Node):
 
     def update_activations(self):
         """
-        Requests a new activation to all nodes in the LTM Cache.
-
-        :param perception: Perception used to calculate the activation
-        :type perception: dict
-        :param new_sensings: Indicates if a sensing change has ocurred, defaults to True
-        :type new_sensings: bool, optional
+        This method updates the activations of the nodes in the LTM cache.
         """
+
         self.get_logger().info("Updating activations...")
         self.semaphore.acquire()
         self.activation_time=self.get_clock().now().nanoseconds
@@ -496,7 +546,7 @@ class MainLoop(Node):
         :type name: str
         :param sensing: Sensing used to calculate the activation.
         :type sensing: dict
-        :return: Activation value returned
+        :return: Activation value.
         :rtype: float
         """
 
@@ -508,6 +558,14 @@ class MainLoop(Node):
         return activation.activation
     
     def create_activation_input(self, name, node_type): #Adds a node from the activation inputs list.
+        """
+        This method creates a new activation input for a node. 
+
+        :param name: Name of the node to be added as an activation input.
+        :type name: str
+        :param node_type:  Type of the node to be added as an activation input.
+        :type node_type: str
+        """
         if name not in self.activation_inputs:
             subscriber=self.create_subscription(Activation, 'cognitive_node/' + str(name) + '/activation', self.read_activation_callback, 1, callback_group=self.cbgroup_server)
             flag=threading.Event()
@@ -517,11 +575,24 @@ class MainLoop(Node):
             self.get_logger().error(f'Tried to add {name} to activation inputs more than once')
     
     def delete_activation_input(self, name): #Deletes a node from the activation inputs list. By default reads activations.
+        """
+        This method deletes an activation input for a node.
+
+        :param name: Name of the node to be deleted as an activation input.
+        :type name: str
+        """
         if name in self.activation_inputs:
             self.destroy_subscription(self.activation_inputs[name])
             self.activation_inputs.pop(name)
 
     def read_activation_callback(self, msg: Activation):
+        """
+        This method receives a message from an activation topic, processes the
+        message and updates the activation in the LTM cache.
+
+        :param msg: Message that contains the activation information.
+        :type msg: cognitive_node_interfaces.msg.Activation
+        """
         node_name=msg.node_name
         node_type=msg.node_type
         activation=msg.activation
@@ -545,7 +616,7 @@ class MainLoop(Node):
 
         :param name: Node name.
         :type name: str
-        :return: List of dictionaries with the information of each neighbor of the node. [{'name': <Neighbor Name>, 'node_type': <Neighbor type>},...]
+        :return: List of dictionaries with the information of each neighbor of the node. [{'name': <Neighbor Name>, 'node_type': <Neighbor type>},...].
         :rtype: list
         """
 
@@ -557,6 +628,16 @@ class MainLoop(Node):
         return neighbors
     
     def add_neighbor(self, node_name, neighbor_name):
+        """
+        This method adds a neighbor to a node in the LTM.
+
+        :param node_name: Name of the node to which the neighbor will be added.
+        :type node_name: str
+        :param neighbor_name: Name of the neighbor to be added.
+        :type neighbor_name: str
+        :return: True if the neighbor was added successfully, False otherwise.
+        :rtype: bool
+        """
         service_name=f"{self.LTM_id}/update_neighbor"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(UpdateNeighbor, service_name)
@@ -566,9 +647,10 @@ class MainLoop(Node):
     def execute_policy(self, perception, policy):
         """
         Execute a policy.
-
         This method sends a request to the policy to be executed.
 
+        :param perception: The perception to be used in the policy execution.
+        :type perception: dict
         :param policy: The policy to execute.
         :type policy: str
         :return: The response from executing the policy.
@@ -586,10 +668,30 @@ class MainLoop(Node):
         return policy_response.policy, action 
     
     def get_goals(self, ltm_cache):
+        """
+        This method retrieves all active goals from the LTM cache.
+
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: List of active goals.
+        :rtype: list
+        """
         goals = self.get_all_active_nodes("Goal", ltm_cache)
         return goals
     
     def get_goals_reward(self, old_sensing, sensing, ltm_cache):
+        """
+        This method retrieves the rewards for each active goal based on the old and current sensing.
+
+        :param old_sensing: Old sensing data.
+        :type old_sensing: dict
+        :param sensing: Current sensing data.
+        :type sensing: dict
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: Dictionary with goal names as keys and their corresponding rewards as values.
+        :rtype: dict
+        """
         self.get_logger().info("Reading rewards...")
         rewards = {}
         old_perception = perception_dict_to_msg(old_sensing)
@@ -623,6 +725,12 @@ class MainLoop(Node):
         return rewards
 
     def get_unlinked_drives(self):
+        """
+        This method retrieves the drives that are not linked to any goal in the LTM cache.
+
+        :return: List of unlinked drives. If there are no unlinked drives, it returns an empty list.
+        :rtype: list
+        """
         drives=self.LTM_cache.get("Drive", None)
         goals=self.LTM_cache.get("Goal", None)
         if drives:
@@ -651,6 +759,14 @@ class MainLoop(Node):
         return WM
     
     def get_needs(self, ltm_cache):
+        """
+        This method retrieves all active needs from the LTM cache.
+
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: List of active needs.
+        :rtype: list
+        """
         needs = self.get_all_active_nodes("Need", ltm_cache)
 
         self.get_logger().info(f"Active Needs: {needs}")
@@ -658,6 +774,16 @@ class MainLoop(Node):
         return needs
     
     def get_need_satisfaction(self, need_list, timestamp):
+        """
+        This method retrieves the satisfaction of each need in the need_list.
+
+        :param need_list: List of needs.
+        :type need_list: list
+        :param timestamp: Timestamp to be used for the request.
+        :type timestamp: rclpy.time.Time
+        :return: Dictionary with need names as keys and their satisfaction status as values.
+        :rtype: dict
+        """
         self.get_logger().info("Reading satisfaction...")
         satisfaction = {}
         response=IsSatisfied.Response()
@@ -677,6 +803,14 @@ class MainLoop(Node):
         return satisfaction
 
     def get_max_activation_node(self, node_type):
+        """
+        This method retrieves the node with the maximum activation of a given type from the LTM cache.
+
+        :param node_type:  Type of the node to be selected (e.g., "WorldModel", "Goal", etc.).
+        :type node_type: str
+        :return: Tuple containing the name of the node with the maximum activation and a dictionary with all activations of that type.
+        :rtype: tuple
+        """
         node_activations = {}
         for node, data in self.LTM_cache[node_type].items():
             node_activations[node] = data["activation"]
@@ -685,6 +819,16 @@ class MainLoop(Node):
         return selected, node_activations
     
     def get_node_activations_by_type(self, node_type, ltm_cache):
+        """
+        This method retrieves the activations of all nodes of a given type from the LTM cache.
+
+        :param node_type: Type of the nodes to be selected (e.g., "WorldModel", "Goal", etc.).
+        :type node_type: str
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: Dictionary with node names as keys and their activations as values, sorted by activation.
+        :rtype: dict
+        """
         act_dict={}
         nodes=ltm_cache[node_type].keys()
         for node in nodes:
@@ -694,6 +838,16 @@ class MainLoop(Node):
         return act_dict
     
     def get_node_activations_by_list(self, node_list, ltm_cache):
+        """
+        This method retrieves the activations of a list of nodes from the LTM cache.
+
+        :param node_list: List of node names to retrieve activations for.
+        :type node_list: list
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: Dictionary with node names as keys and their activations as values, sorted by activation.
+        :rtype: dicts
+        """
         act_dict={}
         for node in node_list:
             act_dict[node]=self.get_node_data(node, ltm_cache)["activation"]
@@ -702,14 +856,40 @@ class MainLoop(Node):
         return act_dict
 
     def get_all_active_nodes(self, node_type, ltm_cache):
+        """
+        This method retrieves all active nodes of a given type from the LTM cache.
+
+        :param node_type: Type of the nodes to be selected (e.g., "WorldModel", "Goal", etc.).
+        :type node_type: str
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: List of active nodes of the specified type.
+        :rtype: list
+        """
         nodes = [name for name in ltm_cache[node_type] if ltm_cache[node_type][name]["activation"] > self.activation_threshold]
         return nodes
     
     def get_node_data(self, node_name, ltm_cache):
+        """
+        This method retrieves the data of a node from the LTM cache.
+
+        :param node_name: Name of the node to retrieve data for.
+        :type node_name: str
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: Data of the node as a dictionary.
+        :rtype: dict
+        """
         return next((nodes_dict[node_name] for nodes_dict in ltm_cache.values() if node_name in nodes_dict))
 
     def update_ltm(self, stm:Episode):
-            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
+        """
+        This method updates the LTM with the perception changes, policy executed and reward obtained.
+
+        :param stm: Episode object containing the information to update the LTM.
+        :type stm: cognitive_processes.main_loop.Episode
+        """
+        self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
 
 
     def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
@@ -728,14 +908,16 @@ class MainLoop(Node):
         -If there are no CNodes connected to the policy a new CNode is created
         if there is reward.
 
-        :param perception: Perception before the execution of the policy
+        :param old_perception: Perception before the execution of the policy.
+        :type old_perception: dict
+        :param perception: Perception after the execution of the policy.
         :type perception: dict
-        :param policy: Policy executed
-        :type policy: dict
-        :param goal: Current goal
-        :type goal: str
-        :param reward: Reward obtained after the execution of the policy
-        :type reward: float
+        :param policy: Policy executed.
+        :type policy: str
+        :param reward_list: Dictionary with the rewards obtained for each goal after the execution of the policy.
+        :type reward_list: dict
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
         """
 
         self.get_logger().info("Updating p-nodes/c-nodes...")
@@ -802,13 +984,13 @@ class MainLoop(Node):
 
     def add_point(self, name, sensing):
         """
-        Sends the request to add a point to a PNode.
+        Sends the request to add a point to a P-Node.
 
-        :param name: Name of the PNode
+        :param name: Name of the P-Node.
         :type name: str
         :param sensing: Sensorial data to be added as a point.
         :type sensing: dict
-        :return: Success status received from the PNode
+        :return: Success status received from the P-Node.
         :rtype: bool
         """
 
@@ -825,13 +1007,13 @@ class MainLoop(Node):
 
     def add_antipoint(self, name, sensing):
         """
-        Sends the request to add an antipoint to a PNode.
+        Sends the request to add an antipoint to a P-Node.
 
-        :param name: Name of the PNode
+        :param name: Name of the P-Node.
         :type name: str
-        :param sensing: Sensorial data to be added as a point.
+        :param sensing: Sensorial data to be added as a antipoint.
         :type sensing: dict
-        :return: Success status received from the PNode
+        :return: Success status received from the P-Node.
         :rtype: bool
         """
 
@@ -850,13 +1032,13 @@ class MainLoop(Node):
 
     def new_cnode(self, perception, goal, policy):
         """
-        This method creates a new CNode/PNode pair.
+        This method creates a new C-Node/P-Node pair.
 
-        :param perception: Perception to be added as the first point in the PNode
+        :param perception: Perception to be added as the first point in the P-Node.
         :type perception: dict
-        :param goal: Goal that will be linked to the CNode
+        :param goal: Goal that will be linked to the C-Node.
         :type goal: str
-        :param policy: Policy that will be linked to the CNode
+        :param policy: Policy that will be linked to the C-Node.
         :type policy: str
         """
 
@@ -896,6 +1078,16 @@ class MainLoop(Node):
         return cnode_name
 
     def new_goal(self, perception, drive):
+        """
+        This method creates a new Goal node linked to a Drive.
+
+        :param perception: Perception to be used in the Goal creation.
+        :type perception: dict
+        :param drive: Drive to which the Goal will be linked.
+        :type drive: str
+        :return: Name of the created Goal node.
+        :rtype: str
+        """
         self.get_logger().info("Creating Goal...")
         goal_name = f"goal_{self.n_goals}"
         goal_class = self.default_class.get("Goal")
@@ -925,9 +1117,9 @@ class MainLoop(Node):
         :type name: str
         :param class_name: Name of the class to be used for the creation of the node.
         :type class_name: str
-        :param parameters: Optional parameters that can be passed to the node, defaults to {}
-        :type parameters: dict, optional
-        :return: Success status received from the commander
+        :param parameters: Optional parameters that can be passed to the node, defaults to {}.
+        :type parameters: dict
+        :return: Success status received from the commander.
         :rtype: bool
         """
 
@@ -946,6 +1138,12 @@ class MainLoop(Node):
     def reset_world(self, check_finish=True):
         """
         Reset the world if necessary, according to the experiment parameters.
+        
+        :param check_finish: If True, checks if the world has finished before deciding to reset. 
+                    If False, only the trial/iteration count is considered.        
+        :type check_finish: bool
+        :return: True if the world was reset, False otherwise.
+        :rtype: bool
         """
 
         changed = False
@@ -981,6 +1179,12 @@ class MainLoop(Node):
         return changed
     
     def world_finished(self):
+        """
+        Check if the world has finished.
+
+        :return: True if the world has finished, False otherwise.
+        :rtype: bool
+        """
         need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
         if len(need_satisfaction)>0:
             finished = any((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
@@ -1001,11 +1205,17 @@ class MainLoop(Node):
             file.write()
 
     def close_files(self):
+        """
+        Close all files when execution is finished.
+        """
         self.get_logger().info("Closing files...")
         for file in self.files:
             file.close()
 
     def publish_episode(self):
+        """
+        Publish the current episode data to the episode topic.
+        """
         msg=EpisodeMsg()
         msg.old_perception = perception_dict_to_msg(self.stm.old_perception)
         msg.policy = self.stm.policy
@@ -1018,7 +1228,6 @@ class MainLoop(Node):
     def run(self, _=None):
         """
         Run the main loop of the system.
-
         """
 
         self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
