@@ -32,12 +32,17 @@ exclude_patterns = []
 
 autodoc_mock_imports = [
     "rclpy",
-    #     "std_msgs",
+    "std_msgs",
     "core",
     "cognitive_processes_interfaces",
     "core_interfaces",
     "cognitive_node_interfaces",
-    #     "simulators_interfaces",
+    "numpy",
+    "yaml",
+    "rclpy.node",
+    "rclpy.executors",
+    "rclpy.callback_groups",
+    "rclpy.time",
 ]
 
 # -- Options for HTML output -------------------------------------------------
