@@ -711,7 +711,10 @@ class MainLoop(Node):
 
         #Add rewards obtained from unlinked drives
         if self.unlinked_drives:
-            active_drives=[drive for drive in self.unlinked_drives if ltm_cache["Drive"][drive]["activation"]>self.activation_threshold]
+            active_drives = [
+                drive for drive in self.unlinked_drives
+                if ltm_cache.get("Drive", {}).get(drive, {}).get("activation", 0) > self.activation_threshold
+            ]
             for drive in active_drives:
                 updated_reward=False
                 while not updated_reward:
