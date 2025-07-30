@@ -14,6 +14,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.time import Time
 
 from core.service_client import ServiceClient
+from cognitive_nodes.episode import Episode
 from cognitive_node_interfaces.srv import (
     Execute,
     GetActivation,
@@ -22,26 +23,14 @@ from cognitive_node_interfaces.srv import (
     AddPoint,
     IsSatisfied
 )
+from cognitive_nodes.episode import reward_dict_to_msg
 from cognitive_node_interfaces.msg import PerceptionStamped, Activation
 from core_interfaces.srv import GetNodeFromLTM, CreateNode, SetChangesTopic, UpdateNeighbor, StopExecution
 from cognitive_processes_interfaces.msg import ControlMsg
-from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
+from cognitive_node_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
-
-class Episode():
-    """
-    Episode class used as STM (Short Term Memory) for the cognitive architecture.
-    """
-    def __init__(self) -> None:
-        self.old_perception={}
-        self.old_ltm_state={}
-        self.policy=''
-        self.actuation={}
-        self.perception={}
-        self.ltm_state={}
-        self.reward_list={}
 
 
 class MainLoop(Node):
@@ -892,7 +881,7 @@ class MainLoop(Node):
         :param stm: Episode object containing the information to update the LTM.
         :type stm: cognitive_processes.main_loop.Episode
         """
-        self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
+        self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.parent_policy, copy(stm.reward_list), stm.old_ltm_state)
 
 
     def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
@@ -1221,10 +1210,10 @@ class MainLoop(Node):
         """
         msg=EpisodeMsg()
         msg.old_perception = perception_dict_to_msg(self.stm.old_perception)
-        msg.policy = self.stm.policy
-        msg.actuation = self.stm.actuation
+        msg.parent_policy = self.stm.parent_policy
+        msg.action.actuation = self.stm.action.actuation
         msg.perception = perception_dict_to_msg(self.stm.perception)
-        msg.reward_list = yaml.dump(self.stm.reward_list)
+        msg.reward_list = reward_dict_to_msg(self.stm.reward_list)
         msg.timestamp = self.get_clock().now().to_msg()
         self.episode_publisher.publish(msg)
 
@@ -1254,8 +1243,8 @@ class MainLoop(Node):
                 self.update_activations()
                 self.stm.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
-                self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
-                self.stm.policy = self.current_policy
+                self.current_policy, self.stm.action.actuation = self.execute_policy(self.stm.perception, self.current_policy)
+                self.stm.parent_policy = self.current_policy
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.update_activations()
                 self.stm.ltm_state=deepcopy(self.LTM_cache)
