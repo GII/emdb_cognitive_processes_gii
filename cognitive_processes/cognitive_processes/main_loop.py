@@ -41,18 +41,17 @@ class MainLoop(CognitiveProcess):
     # =========================
     # INITIALIZATION & SETUP
     # =========================
-    def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
+    def __init__(self, node: Node, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
         """
         Constructor for the MainLoop class.
         Initializes the MainLoop node and starts the main loop execution.
 
+        :param node: The ROS2 Node instance.
+        :type node: rclpy.node.Node
         :param name: The name of the MainLoop node.
         :type name: str
         """
-        super().__init__(name, **params)
-
-        # --- STM ---
-        self.stm = Episode()
+        super().__init__(node, **params)
         
         # --- Reward and policy selection ---
         self.reward_threshold = 0.9
@@ -64,7 +63,6 @@ class MainLoop(CognitiveProcess):
         self.softmax_temperature = softmax_temperature
 
         # --- Node/goal/drive management ---
-        self.unlinked_drives = []
         self.current_world = None
         self.n_cnodes = 0
         self.n_goals = 0
@@ -79,11 +77,9 @@ class MainLoop(CognitiveProcess):
         self.last_reset = 0
         self.kill_on_finish = kill_on_finish
 
-        self.set_attributes_from_params(params)
-
         # Read LTM and configure perceptions
+        self.set_attributes_from_params(params)
         self.setup()
-
         self.start_threading()
 
 
@@ -100,19 +96,6 @@ class MainLoop(CognitiveProcess):
         self.setup_files()
         self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
 
-    def read_ltm(self, ltm_dump=None):
-        """
-        Makes an empty call for the LTM get_node service which returns all the nodes
-        stored in the LTM. Then, a LTM cache dictionary is populated with the data.
-
-        :param ltm_dump: Optional LTM dump to be used instead of requesting it from the current one.
-        :type ltm_dump: dict
-        """
-        super().read_ltm(ltm_dump=ltm_dump)
-
-        # Check if there are any drives not linked to goals
-        self.unlinked_drives = self.get_unlinked_drives()
-
     # =========================
     # File Handling
     # =========================
@@ -122,11 +105,11 @@ class MainLoop(CognitiveProcess):
         Configures the output files.
         """ 
         if hasattr(self, "Files"):
-            self.get_logger().info("Files detected, loading files...")
+            self.node.get_logger().info("Files detected, loading files...")
             for file_item in self.Files:
                 self.add_file(file_item)
         else:
-            self.get_logger().info("No files detected...")
+            self.node.get_logger().info("No files detected...")
 
     def add_file(self, file_item):
         """
@@ -153,8 +136,8 @@ class MainLoop(CognitiveProcess):
         Method that writes the files with execution data.
         """
 
-        self.get_logger().info("Writing files publishing status...")
-        self.get_logger().debug(f"DEBUG: {self.pnodes_success}")
+        self.node.get_logger().info("Writing files publishing status...")
+        self.node.get_logger().debug(f"DEBUG: {self.pnodes_success}")
         for file in self.files:
             if file.file_object is None:
                 file.write_header()
@@ -164,7 +147,7 @@ class MainLoop(CognitiveProcess):
         """
         Close all files when execution is finished.
         """
-        self.get_logger().info("Closing files...")
+        self.node.get_logger().info("Closing files...")
         for file in self.files:
             file.close()
     
@@ -212,8 +195,8 @@ class MainLoop(CognitiveProcess):
 
         for policy in policies:
             all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
-        self.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
-        self.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
+        self.node.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
+        self.node.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
         if not policy_activations:
             policy_pool = all_policy_activations
         else:
@@ -225,13 +208,13 @@ class MainLoop(CognitiveProcess):
             selected= self.select_max_policy(policy_pool)
 
 
-        self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
-        self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
+        self.node.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
+        self.node.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
         if not policy_pool[selected]:
             selected = self.random_policy()
 
-        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        self.node.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
 
         return selected
     
@@ -270,7 +253,7 @@ class MainLoop(CognitiveProcess):
 
         # Select a policy based on the probabilities
         selected = self.rng.choice(policy_names, p=probabilities)
-        self.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
+        self.node.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
         return selected
 
     def random_policy(self):
@@ -324,171 +307,7 @@ class MainLoop(CognitiveProcess):
         act_file = getattr(self, "act_file", None) #CHANGE THIS
         if act_file is not None:
             act_file.receive_activation_callback(msg)
-
-    # =========================
-    # POLICY EXECUTION
-    # =========================
-    def execute_policy(self, perception, policy):
-        """
-        Execute a policy.
-        This method sends a request to the policy to be executed.
-
-        :param perception: The perception to be used in the policy execution.
-        :type perception: dict
-        :param policy: The policy to execute.
-        :type policy: str
-        :return: The response from executing the policy.
-        :rtype: The executed policy.
-        """
-        service_name = "policy/" + str(policy) + "/execute"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Execute, service_name)
-        perc_msg=perception_dict_to_msg(perception)
-        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        action= policy_response.action
-        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
-        return policy_response.policy, action 
     
-    # =========================
-    # GOALS, REWARDS, NEEDS
-    # =========================
-    
-    def get_goals(self, ltm_cache):
-        """
-        This method retrieves all active goals from the LTM cache.
-
-        :param ltm_cache: LTM cache containing the nodes and their data.
-        :type ltm_cache: dict
-        :return: List of active goals.
-        :rtype: list
-        """
-        goals = self.get_all_active_nodes("Goal", ltm_cache)
-        return goals
-    
-    def get_goals_reward(self, old_sensing, sensing, ltm_cache):
-        """
-        This method retrieves the rewards for each active goal based on the old and current sensing.
-
-        :param old_sensing: Old sensing data.
-        :type old_sensing: dict
-        :param sensing: Current sensing data.
-        :type sensing: dict
-        :param ltm_cache: LTM cache containing the nodes and their data.
-        :type ltm_cache: dict
-        :return: Dictionary with goal names as keys and their corresponding rewards as values.
-        :rtype: dict
-        """
-        self.get_logger().info("Reading rewards...")
-        rewards = {}
-        old_perception = perception_dict_to_msg(old_sensing)
-        perception = perception_dict_to_msg(sensing)
-
-        for goal in self.active_goals:
-            updated_reward=False
-            while not updated_reward:
-                service_name = "goal/" + str(goal) + "/get_reward"
-                if service_name not in self.node_clients:
-                    self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                reward = self.node_clients[service_name].send_request(
-                    old_perception=old_perception, perception=perception
-                )
-                rewards[goal] = reward.reward
-                updated_reward=reward.updated
-
-        #Add rewards obtained from unlinked drives
-        if self.unlinked_drives:
-            active_drives = [
-                drive for drive in self.unlinked_drives
-                if ltm_cache.get("Drive", {}).get(drive, {}).get("activation", 0) > self.activation_threshold
-            ]
-            for drive in active_drives:
-                updated_reward=False
-                while not updated_reward:
-                    service_name = "drive/" + str(drive) + "/get_reward"
-                    if service_name not in self.node_clients:
-                        self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                    reward = self.node_clients[service_name].send_request()
-                    rewards[drive] = reward.reward
-                    updated_reward=reward.updated
-        self.get_logger().info(f"Reward_list: {rewards}")
-        return rewards
-
-    def get_unlinked_drives(self):
-        """
-        This method retrieves the drives that are not linked to any goal in the LTM cache.
-
-        :return: List of unlinked drives. If there are no unlinked drives, it returns an empty list.
-        :rtype: list
-        """
-        drives=self.LTM_cache.get("Drive", None)
-        goals=self.LTM_cache.get("Goal", None)
-        if drives:
-            drives_list=list(drives.keys())
-            for goal in goals:
-                neighbors=goals[goal]["neighbors"]
-                for neighbor in neighbors:
-                    if neighbor["name"] in drives_list:
-                        drives_list.remove(neighbor["name"])
-            return drives_list
-        else:
-            return []
-
-    def get_current_world_model(self):
-        """
-        This method selects the world model with the highest activation in the LTM cache.
-
-        :return: World model with highest activation.
-        :rtype: str
-        """
-        WM, WM_activations = self.get_max_activation_node("WorldModel")
-        self.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
-
-        return WM
-    
-    def get_needs(self, ltm_cache):
-        """
-        This method retrieves all active needs from the LTM cache.
-
-        :param ltm_cache: LTM cache containing the nodes and their data.
-        :type ltm_cache: dict
-        :return: List of active needs.
-        :rtype: list
-        """
-        needs = self.get_all_active_nodes("Need", ltm_cache)
-
-        self.get_logger().info(f"Active Needs: {needs}")
-                    
-        return needs
-    
-    def get_need_satisfaction(self, need_list, timestamp):
-        """
-        This method retrieves the satisfaction of each need in the need_list.
-
-        :param need_list: List of needs.
-        :type need_list: list
-        :param timestamp: Timestamp to be used for the request.
-        :type timestamp: rclpy.time.Time
-        :return: Dictionary with need names as keys and their satisfaction status as values.
-        :rtype: dict
-        """
-        self.get_logger().info("Reading satisfaction...")
-        satisfaction = {}
-        response=IsSatisfied.Response()
-        for need in need_list:
-            service_name = "need/" + str(need) + "/get_satisfaction"
-            if service_name not in self.node_clients:
-                self.node_clients[service_name] = ServiceClient(IsSatisfied, service_name)
-            while not response.updated:
-                response = self.node_clients[service_name].send_request(
-                    timestamp=timestamp.to_msg()
-                )
-            satisfaction[need] = dict(satisfied=response.satisfied, need_type=response.need_type)
-            response.updated = False
-
-        self.get_logger().info(f"Satisfaction list: {satisfaction}")
-
-        return satisfaction
-
     # =========================
     # LTM & STM UPDATES
     # =========================
@@ -530,7 +349,7 @@ class MainLoop(CognitiveProcess):
         :type ltm_cache: dict
         """
 
-        self.get_logger().info("Updating p-nodes/c-nodes...")
+        self.node.get_logger().info("Updating p-nodes/c-nodes...")
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
         cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
@@ -590,9 +409,26 @@ class MainLoop(CognitiveProcess):
                 updates = True
 
         if not updates:
-            self.get_logger().info("No update required in PNode/CNodes")
+            self.node.get_logger().info("No update required in PNode/CNodes")
 
+    def add_point(self, name, sensing):
+        response = super().add_point(name, sensing)
+        self.pnodes_success[name] = True
+        return response
     
+    def add_antipoint(self, name, sensing):
+        """
+        Adds an antipoint to the specified PNode.
+
+        :param name: Name of the PNode to which the antipoint is added.
+        :type name: str
+        :param sensing: Sensing data to be used for the antipoint.
+        :type sensing: dict
+        """
+        response = super().add_antipoint(name, sensing)
+        self.pnodes_success[name] = False
+        return response
+
     # =========================
     # World Reset Management
     # =========================
@@ -629,10 +465,10 @@ class MainLoop(CognitiveProcess):
                 self.last_reset=self.iteration
 
             if getattr(self, "world_reset_client", None):
-                self.get_logger().info("Requesting world reset service...")
+                self.node.get_logger().info("Requesting world reset service...")
                 self.world_reset_client.send_request(iteration=self.iteration, world=self.current_world)
             else:
-                self.get_logger().info("Asking for a world reset...")
+                self.node.get_logger().info("Asking for a world reset...")
                 msg = ControlMsg()
                 msg.command = "reset_world"
                 msg.world = self.current_world
@@ -647,7 +483,7 @@ class MainLoop(CognitiveProcess):
         :return: True if the world has finished, False otherwise.
         :rtype: bool
         """
-        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
+        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.node.get_clock().now())
         if len(need_satisfaction)>0:
             finished = any((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
         else:
@@ -662,56 +498,186 @@ class MainLoop(CognitiveProcess):
         Run the main loop of the system.
         """
 
-        self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
+        self.node.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
 
         self.current_world = self.get_current_world_model()
         self.reset_world()
-        self.stm.perception = self.read_perceptions()
+        self.current_episode.perception = self.read_perceptions()
         self.update_activations()
         self.active_goals = self.get_goals(self.LTM_cache)
-        self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception, self.LTM_cache)
+        self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
         
         while (self.iteration <= self.iterations) and (not self.stop):
 
             if not self.paused:
 
-                self.get_logger().info(
+                self.node.get_logger().info(
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.publish_iteration()
                 self.update_activations()
-                self.stm.old_ltm_state=deepcopy(self.LTM_cache)
+                self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
-                self.current_policy, self.stm.action.actuation = self.execute_policy(self.stm.perception, self.current_policy)
-                self.stm.parent_policy = self.current_policy
-                self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
+                self.current_policy, self.current_episode.action.actuation = self.execute_policy(self.current_episode.perception, self.current_policy)
+                self.current_episode.parent_policy = self.current_policy
+                self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
                 self.update_activations()
-                self.stm.ltm_state=deepcopy(self.LTM_cache)
+                self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 
-                self.get_logger().info(
-                    f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
+                self.node.get_logger().info(
+                    f"DEBUG PERCEPTION: \n old_sensing: {self.current_episode.old_perception} \n     sensing: {self.current_episode.perception}"
                 )
 
 
-                self.active_goals = self.get_goals(self.stm.old_ltm_state)
-                self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception, self.stm.old_ltm_state)
+                self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
+                self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
 
                 self.publish_episode()
 
-                self.update_ltm(self.stm)
+                self.update_ltm(self.current_episode)
 
 
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
-                    self.stm.perception = reset_sensing
-                    self.stm.ltm_state = self.LTM_cache
+                    self.current_episode.perception = reset_sensing
+                    self.current_episode.ltm_state = self.LTM_cache
+
+                # self.update_policies_to_test(
+                #     policy=(
+                #         self.current_policy
+                #         if not self.sensorial_changes(self.current_episode.perception, self.current_episode.old_perception)
+                #         else None
+                #     )
+                # )
+                
+                self.update_status()
+                self.iteration += 1
+
+        self.close_files()
+        if self.kill_on_finish:
+            self.kill_commander_client.send_request()
+
+
+class MainLoopLight(MainLoop):
+    """
+    MainLoopLight class for running the main loop with only action selection
+    """
+
+    def __init__(self, node: Node, **params):
+        """
+        Constructor for the MainLoopLight class.
+        Initializes the MainLoopLight node and starts the main loop execution.
+
+        :param node: The ROS2 Node instance.
+        :type node: rclpy.node.Node
+        """
+        super().__init__(node, **params)
+
+    def select_policy(self, softmax=False):
+        """
+        Selects the policy with the higher activation.
+        If softmax is True, it selects the policy using a softmax function.
+        If no policy is selected, it selects a random policy.
+
+        :param softmax: If True, selects the policy using a softmax function, defaults to False.
+        :type softmax: bool
+        :return: The selected policy.
+        :rtype: str
+        """
+        policy_list = list(self.LTM_cache["Policy"].keys()) + list(self.LTM_cache["UtilityModel"].keys())
+        policy_pool = self.get_node_activations_by_list(policy_list, self.LTM_cache)
+
+        if softmax:
+            selected = self.select_policy_softmax(policy_pool, self.softmax_temperature)
+        else: 
+            selected= self.select_max_policy(policy_pool)
+        self.node.get_logger().info("Select_policy - Activations: " + str(policy_pool))
+        self.node.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        return selected
+    
+    def execute_policy(self, perception, policy):
+        """
+        Execute a policy or utility model.
+        This method sends a request to the policy to be executed.
+
+        :param perception: The perception to be used in the policy execution.
+        :type perception: dict
+        :param policy: The policy to execute.
+        :type policy: str
+        :return: The response from executing the policy.
+        :rtype: The executed policy.
+        """
+        node_type = self.get_node_type(policy, self.LTM_cache)
+        if node_type not in ["Policy", "UtilityModel"]:
+            self.node.get_logger().error(f"Invalid node type for policy execution: {node_type}")
+            return None, None
+        elif node_type == "UtilityModel":
+            service_name = "utility_model/" + str(policy) + "/execute"
+        else:
+            service_name = "policy/" + str(policy) + "/execute"
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(Execute, service_name)
+        perc_msg=perception_dict_to_msg(perception)
+        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
+        action= policy_response.action
+        self.node.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
+        return policy_response.policy, action 
+
+    def run(self):
+        """
+        Run the main loop of the system.
+        """
+
+        self.node.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
+
+        self.current_world = self.get_current_world_model()
+        self.reset_world()
+        self.current_episode.perception = self.read_perceptions()
+        self.update_activations()
+        self.iteration = 1
+        
+        while (self.iteration <= self.iterations) and (not self.stop):
+
+            if not self.paused:
+
+                self.node.get_logger().info(
+                    "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
+                )
+                self.publish_iteration()
+                self.update_activations()
+                self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
+                self.current_policy = self.select_policy(softmax=self.softmax_selection)
+                self.current_policy, self.current_episode.action.actuation = self.execute_policy(self.current_episode.perception, self.current_policy)
+                self.current_episode.parent_policy = self.current_policy
+                self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
+                self.update_activations()
+                self.current_episode.ltm_state=deepcopy(self.LTM_cache)
+
+                self.node.get_logger().info(
+                    f"DEBUG PERCEPTION: \n old_sensing: {self.current_episode.old_perception} \n     sensing: {self.current_episode.perception}"
+                )
+
+
+                #self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
+                #self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+
+                #self.publish_episode()
+
+                #self.update_ltm(self.current_episode)
+
+
+                if self.reset_world():
+                    reset_sensing = self.read_perceptions()
+                    self.update_activations()
+                    self.current_episode.perception = reset_sensing
+                    self.current_episode.ltm_state = self.LTM_cache
 
                 self.update_policies_to_test(
                     policy=(
                         self.current_policy
-                        if not self.sensorial_changes(self.stm.perception, self.stm.old_perception)
+                        if not self.sensorial_changes(self.current_episode.perception, self.current_episode.old_perception)
                         else None
                     )
                 )
@@ -722,21 +688,30 @@ class MainLoop(CognitiveProcess):
         if self.kill_on_finish:
             self.kill_commander_client.send_request()
 
+class MainLoopNode(Node):
+    """
+    MainLoopNode class for running the main loop as a ROS2 node.
+    """
+
+    def __init__(self, name, main_loop_class=None, **params):
+        super().__init__(name)
+        if main_loop_class is None:
+            raise ValueError("main_loop_class must be provided")
+        self.main_loop = class_from_classname(main_loop_class)(self, **params)
 
 def main(args=None):
     rclpy.init()
 
     executor = MultiThreadedExecutor(num_threads=2)
-    # executor=SingleThreadedExecutor()
-    main_loop = MainLoop("main_loop")
+    node = MainLoopNode("main_loop_node", main_loop_class="cognitive_processes.main_loop.MainLoop")
 
-    executor.add_node(main_loop)  # Test
-    main_loop.get_logger().info("Runnning node")
+    executor.add_node(node)
+    node.get_logger().info("Running node")
 
     try:
         executor.spin()
     except KeyboardInterrupt:
-        main_loop.destroy_node()
+        node.destroy_node()
 
 
 if __name__ == "__main__":
