@@ -1,3 +1,4 @@
+import numpy as np
 import threading
 from copy import deepcopy
 
@@ -13,7 +14,7 @@ class Deliberation(CognitiveProcess):
     """
     Deliberation class: A cognitive process that allows the agent to deliberate on its actions and decisions.
     """
-    def __init__(self, node, iterations=0, trials=1, LTM_id="", candidate_actions=5, softmax_temperature=1.0, clear_buffer=True, **params):
+    def __init__(self, node, iterations=0, trials=1, LTM_id="", candidate_actions=5, softmax_selection = True, softmax_temperature=1.0, clear_buffer=True, candidate_generation="latin", **params):
         """
         Constructor of the Deliberation class.
         """
@@ -25,7 +26,10 @@ class Deliberation(CognitiveProcess):
         self.finished_flag = threading.Event()
         self.clear_buffer = clear_buffer
         
+        self.softmax_selection = softmax_selection
         self.softmax_temperature = softmax_temperature
+        self.candidate_generation = candidate_generation
+        self.reward_threshold = 0.1
         
         # Read LTM and configure perceptions
         self.set_attributes_from_params(params)
@@ -56,12 +60,17 @@ class Deliberation(CognitiveProcess):
             )
         self.action_sampler = LatinHypercube(d=self.actuation_dims, rng=self.rng)
 
-    def generate_candidate_actions(self, old_perception=None):
+    def generate_candidate_actions(self, old_perception=None, algorithm = "latin"):
         """
         Generates a list of candidate Episode objects based on the configured actuation dimensions.
         Each Episode will have its old_perception set to the argument and action.actuation set to the candidate action.
         """
-        candidate_matrix = self.action_sampler.random(n=self.candidate_actions)
+        if algorithm == "latin":
+            candidate_matrix = self.action_sampler.random(n=self.candidate_actions)
+        elif algorithm == "random":
+            candidate_matrix = self.rng.random((self.candidate_actions, self.actuation_dims))
+        else:
+            raise ValueError(f"Unknown algorithm: {algorithm}")
         action_list = [deepcopy(self.actuation_dict) for _ in range(self.candidate_actions)]
         for i, action in enumerate(action_list):
             offset = 0
@@ -111,21 +120,48 @@ class Deliberation(CognitiveProcess):
         """
         Selects an action probabilistically using softmax over the expected utilities.
         """
-        import numpy as np
-        # Compute softmax probabilities
-        utilities = np.array(expected_utilities)
-        temp = self.softmax_temperature if hasattr(self, "softmax_temperature") else 1.0
-        exp_utilities = np.exp((utilities - np.max(utilities)) / temp)
-        probs = exp_utilities / np.sum(exp_utilities)
-        # Sample an index according to the probabilities
-        selected_index = np.random.choice(len(predicted_episodes), p=probs)
-        selected_episode = predicted_episodes[selected_index]
+        softmax = getattr(self, "softmax_selection", True)
+        if softmax:
+            # Compute softmax probabilities
+            utilities = np.array(expected_utilities)
+            temp = self.softmax_temperature if hasattr(self, "softmax_temperature") else 1.0
+            exp_utilities = np.exp((utilities - np.max(utilities)) / temp)
+            probs = exp_utilities / np.sum(exp_utilities)
+            # Sample an index according to the probabilities
+            selected_index = np.random.choice(len(predicted_episodes), p=probs)
+            selected_episode = predicted_episodes[selected_index]
+        else:
+            selected_index = np.argmax(expected_utilities)
+            selected_episode = predicted_episodes[selected_index]
         self.node.get_logger().info(f"Selected action: {selected_episode.action} with utility {expected_utilities[selected_index]}")
         return selected_episode.action
     
     def publish_episode(self):
         super().publish_episode()
         self.node.episodic_buffer.add_episode(self.current_episode)
+
+    def get_linked_goals(self):
+        """
+        Retrieves the goal linked to the parent node of the process
+        """
+        cnodes = [neighbor["name"] for neighbor in self.node.neighbors if neighbor["node_type"] == "CNode"]
+        self.node.get_logger().info(f"Linked CNodes: {cnodes}")
+        cnodes_neighbors = []
+        for cnode in cnodes:
+            cnodes_neighbors.extend(self.LTM_cache["CNode"][cnode]["neighbors"])
+        self.node.get_logger().info(f"Linked CNodes neighbors: {cnodes_neighbors}")
+        linked_goals = [neighbor["name"] for neighbor in cnodes_neighbors if neighbor["node_type"] == "Goal"]
+        self.node.get_logger().info(f"Linked goals: {linked_goals}")
+        return linked_goals
+
+    def check_completion(self):
+        self.node.get_logger().info("Checking if goals are completed")
+        linked_goals = self.get_linked_goals()
+        self.node.get_logger().info(f"Linked goals: {linked_goals}")
+        self.node.get_logger().info(f"Current rewards: {self.current_episode.reward_list}")
+        rewards = [self.current_episode.reward_list[goal] for goal in linked_goals if goal in self.current_episode.reward_list]
+        return any([reward > self.reward_threshold for reward in rewards])
+
 
     def deliberation_cycle(self):
         self.start_flag.wait()
@@ -139,8 +175,9 @@ class Deliberation(CognitiveProcess):
         self.active_goals = self.get_goals(self.LTM_cache)
         self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
-        
-        while (self.iteration <= self.iterations) and (not self.stop):
+        finished = False
+
+        while (self.iteration <= self.iterations) and (not self.stop) and not finished:
 
             if not self.paused:
 
@@ -150,7 +187,7 @@ class Deliberation(CognitiveProcess):
                 self.update_activations()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 # GENERATE POSSIBLE ACTIONS
-                candidate_actions = self.generate_candidate_actions(self.current_episode.perception)
+                candidate_actions = self.generate_candidate_actions(self.current_episode.perception, self.candidate_generation)
                 # PREDICT EXPECTED PERCEPTIONS
                 predicted_episodes = self.predict_perceptions(
                     self.current_world, candidate_actions
@@ -170,6 +207,7 @@ class Deliberation(CognitiveProcess):
                 )
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
                 self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                finished = self.check_completion()
                 self.publish_episode()
                 self.iteration += 1
 
@@ -181,10 +219,12 @@ class Deliberation(CognitiveProcess):
         self.current_episode.perception = self.read_perceptions()
         self.node.episodic_buffer.add_episode(self.current_episode)
         while True:
-            self.deliberation_cycle()
-
-
-
+            try:
+                self.deliberation_cycle()
+            except:
+                self.finished_flag.set()
+                self.start_flag.clear()
+                break
 
 
 
