@@ -14,7 +14,7 @@ class Deliberation(CognitiveProcess):
     """
     Deliberation class: A cognitive process that allows the agent to deliberate on its actions and decisions.
     """
-    def __init__(self, node, iterations=0, trials=1, LTM_id="", candidate_actions=5, softmax_selection = True, softmax_temperature=1.0, clear_buffer=True, candidate_generation="latin", **params):
+    def __init__(self, node, iterations=0, trials=1, LTM_id="", candidate_actions=5, softmax_selection = True, softmax_temperature=1.0, candidate_generation="latin", **params):
         """
         Constructor of the Deliberation class.
         """
@@ -24,12 +24,12 @@ class Deliberation(CognitiveProcess):
 
         self.start_flag = threading.Event()
         self.finished_flag = threading.Event()
-        self.clear_buffer = clear_buffer
         
         self.softmax_selection = softmax_selection
         self.softmax_temperature = softmax_temperature
         self.candidate_generation = candidate_generation
         self.reward_threshold = 0.1
+        self.current_reward = 0.0
         
         # Read LTM and configure perceptions
         self.set_attributes_from_params(params)
@@ -138,7 +138,7 @@ class Deliberation(CognitiveProcess):
     
     def publish_episode(self):
         super().publish_episode()
-        self.node.episodic_buffer.add_episode(self.current_episode)
+        self.node.episodic_buffer.add_episode(self.current_episode, self.current_reward)
 
     def get_linked_goals(self):
         """
@@ -160,6 +160,7 @@ class Deliberation(CognitiveProcess):
         self.node.get_logger().info(f"Linked goals: {linked_goals}")
         self.node.get_logger().info(f"Current rewards: {self.current_episode.reward_list}")
         rewards = [self.current_episode.reward_list[goal] for goal in linked_goals if goal in self.current_episode.reward_list]
+        self.current_reward = max(rewards) if rewards else 0.0
         return any([reward > self.reward_threshold for reward in rewards])
 
 
@@ -167,8 +168,6 @@ class Deliberation(CognitiveProcess):
         self.start_flag.wait()
 
         self.node.get_logger().info("Deliberation process started")
-        if self.clear_buffer:
-            self.node.episodic_buffer.clear()
         self.current_world = self.get_current_world_model()
         self.current_episode.perception = self.read_perceptions()
         self.update_activations()
@@ -217,11 +216,13 @@ class Deliberation(CognitiveProcess):
 
     def run(self):
         self.current_episode.perception = self.read_perceptions()
-        self.node.episodic_buffer.add_episode(self.current_episode)
+        self.node.episodic_buffer.configure_labels(self.current_episode)
+        
         while True:
             try:
                 self.deliberation_cycle()
-            except:
+            except Exception as e:
+                self.node.get_logger().error(f"Exception in deliberation cycle: {e}")
                 self.finished_flag.set()
                 self.start_flag.clear()
                 break
