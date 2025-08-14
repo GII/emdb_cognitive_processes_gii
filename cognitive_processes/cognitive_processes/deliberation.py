@@ -1,5 +1,6 @@
 import numpy as np
 import threading
+import traceback
 from copy import deepcopy
 
 from cognitive_nodes.episode import Episode, Action, episode_obj_list_to_msg_list, episode_msg_list_to_obj_list
@@ -127,6 +128,7 @@ class Deliberation(CognitiveProcess):
             temp = self.softmax_temperature if hasattr(self, "softmax_temperature") else 1.0
             exp_utilities = np.exp((utilities - np.max(utilities)) / temp)
             probs = exp_utilities / np.sum(exp_utilities)
+            probs = probs.reshape(-1)
             # Sample an index according to the probabilities
             selected_index = np.random.choice(len(predicted_episodes), p=probs)
             selected_episode = predicted_episodes[selected_index]
@@ -223,6 +225,7 @@ class Deliberation(CognitiveProcess):
                 self.deliberation_cycle()
             except Exception as e:
                 self.node.get_logger().error(f"Exception in deliberation cycle: {e}")
+                self.node.get_logger().error(traceback.format_exc())
                 self.finished_flag.set()
                 self.start_flag.clear()
                 break
