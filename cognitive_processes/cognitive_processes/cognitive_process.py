@@ -18,15 +18,15 @@ from cognitive_node_interfaces.msg import Episode as EpisodeMsg
 from cognitive_node_interfaces.msg import PerceptionStamped, Activation
 from cognitive_node_interfaces.srv import GetActivation, AddPoint, IsSatisfied, GetReward, Execute
 
-class CognitiveProcess:
+class CognitiveProcess(Node):
     """
     CognitiveProcess class, base class for cognitive processes in the architecture.
     """
-    def __init__(self, node: Node, iterations = 0, trials = 1, LTM_id="", **params):
+    def __init__(self, name, iterations = 0, trials = 1, LTM_id="", **params):
         """
         Constructor of the CognitiveProcess class.
         """
-        self.node = node
+        super().__init__(name)
         # --- Loop control variables ---
         self.iteration = 0
         self.iterations = iterations
@@ -77,13 +77,13 @@ class CognitiveProcess:
 
     def set_attributes_from_params(self, params):
         for key, value in params.items():
-            self.node.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
+            self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
             setattr(self, key, value)
 
     def start_threading(self):
-        loop_thread = threading.Thread(target=self.run, daemon=True)
+        self.loop_thread = threading.Thread(target=self.run, daemon=True)
         self.semaphore = threading.Semaphore()
-        loop_thread.start()
+        self.loop_thread.start()
 
     def setup(self):
         """
@@ -102,7 +102,7 @@ class CognitiveProcess:
         """
         Sets up a subscription to the LTM state topic.
         """
-        self.ltm_suscription = self.node.create_subscription(String, "state", self.ltm_change_callback, 0, callback_group=self.cbgroup_client)
+        self.ltm_suscription = self.create_subscription(String, "state", self.ltm_change_callback, 0, callback_group=self.cbgroup_client)
 
     def setup_connectors(self):
         """
@@ -123,8 +123,8 @@ class CognitiveProcess:
         world_reset_service=self.Control.get("world_reset_service", None)
         self.action_service = self.Control.get("executed_action_service", None)
         self.action_msg = self.Control.get("executed_action_msg", None)
-        self.control_publisher = self.node.create_publisher(class_from_classname(control_msg), self.Control["control_topic"], 10)
-        self.episode_publisher = self.node.create_publisher(class_from_classname(episode_msg), self.Control["episodes_topic"], 10)
+        self.control_publisher = self.create_publisher(class_from_classname(control_msg), self.Control["control_topic"], 10)
+        self.episode_publisher = self.create_publisher(class_from_classname(episode_msg), self.Control["episodes_topic"], 10)
         if world_reset_msg and world_reset_service:
             self.world_reset_client = ServiceClient(class_from_classname(world_reset_msg), world_reset_service)
         if self.action_service and self.action_msg:
@@ -136,26 +136,26 @@ class CognitiveProcess:
         """
         Reads the LTM cache and populates the perception subscribers and perception cache dictionaries.
         """
-        self.node.get_logger().info("Configuring perceptions...")
+        self.get_logger().info("Configuring perceptions...")
         perceptions = iter(self.LTM_cache['Perception'].keys())
 
-        self.node.get_logger().debug(f"Perception list: {str(perceptions)}")
+        self.get_logger().debug(f"Perception list: {str(perceptions)}")
 
         for perception in perceptions:
 
-            subscriber = self.node.create_subscription(
+            subscriber = self.create_subscription(
                 PerceptionStamped,
                 f"/perception/{perception}/value",
                 self.receive_perception_callback,
                 1,
                 callback_group=self.cbgroup_perception,
             )
-            self.node.get_logger().debug(f"Subscription to: /perception/{perception}/value created")
+            self.get_logger().debug(f"Subscription to: /perception/{perception}/value created")
             self.perception_suscribers[perception] = subscriber
             self.perception_cache[perception] = {}
             self.perception_cache[perception]["flag"] = threading.Event()
         # TODO check that all perceptions in the cache still exist in the LTM and destroy suscriptions that are no longer used
-        self.node.get_logger().debug(f"Perception cache: {self.perception_cache}")
+        self.get_logger().debug(f"Perception cache: {self.perception_cache}")
     
     
 
@@ -171,12 +171,12 @@ class CognitiveProcess:
         :param ltm_dump: Optional LTM dump to be used instead of requesting it from the current one.
         :type ltm_dump: dict
         """
-        self.node.get_logger().info("Reading nodes from LTM: " + self.LTM_id + "...")
+        self.get_logger().info("Reading nodes from LTM: " + self.LTM_id + "...")
         
         #Get a LTM dump if not provided
         if not ltm_dump:
             ltm_dump = self.request_ltm()
-            self.node.get_logger().debug(f"LTM Dump: {str(ltm_dump)}")
+            self.get_logger().debug(f"LTM Dump: {str(ltm_dump)}")
         
         #Add missing elements from LTM to LTM Cache
         for node_type in ltm_dump.keys():
@@ -212,7 +212,7 @@ class CognitiveProcess:
         :type msg: std_msgs.msg.String
         """
         self.semaphore.acquire()
-        self.node.get_logger().info("Processing change from LTM...")
+        self.get_logger().info("Processing change from LTM...")
         ltm_dump = yaml.safe_load(msg.data)
         self.read_ltm(ltm_dump=ltm_dump)
         #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
@@ -264,7 +264,7 @@ class CognitiveProcess:
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
         action= policy_response.action
-        self.node.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
+        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, action 
     
     def execute_actuation(self, actuation:dict):
@@ -279,10 +279,10 @@ class CognitiveProcess:
         if self.action_client:
             actuation_msg = actuation_dict_to_msg(actuation)
             response = self.action_client.send_request(action=actuation_msg)
-            self.node.get_logger().info("Executed action with response: " + str(response))
+            self.get_logger().info("Executed action with response: " + str(response))
             return response
         else:
-            self.node.get_logger().error("Action client not configured.")
+            self.get_logger().error("Action client not configured.")
             return False
 
     # =========================
@@ -299,7 +299,7 @@ class CognitiveProcess:
         msg.action = action_obj_to_msg(self.current_episode.action)
         msg.perception = perception_dict_to_msg(self.current_episode.perception)
         msg.reward_list = reward_dict_to_msg(self.current_episode.reward_list)
-        msg.timestamp = self.node.get_clock().now().to_msg()
+        msg.timestamp = self.get_clock().now().to_msg()
         self.episode_publisher.publish(msg)
 
     # =========================
@@ -319,16 +319,16 @@ class CognitiveProcess:
         :rtype: dict
         """
 
-        self.node.get_logger().info("Reading perceptions...")
+        self.get_logger().info("Reading perceptions...")
 
         sensing = {}
-        self.perception_time = self.node.get_clock().now().nanoseconds
+        self.perception_time = self.get_clock().now().nanoseconds
 
         for (
             sensor
         ) in self.perception_cache.keys():  # TODO: Consider perception activation when reading
             self.perception_cache[sensor]["flag"].clear()
-            self.node.get_logger().debug("Clearing flags: " + str(sensor))
+            self.get_logger().debug("Clearing flags: " + str(sensor))
 
         for (
             sensor
@@ -336,9 +336,9 @@ class CognitiveProcess:
             self.perception_cache[sensor]["flag"].wait()
             sensing[sensor] = copy(self.perception_cache[sensor]["data"])
             self.perception_cache[sensor]["flag"].clear()
-            self.node.get_logger().debug("Processing perception: " + str(sensor))
+            self.get_logger().debug("Processing perception: " + str(sensor))
 
-        self.node.get_logger().debug("DEBUG Read Perceptions: " + str(sensing))
+        self.get_logger().debug("DEBUG Read Perceptions: " + str(sensing))
         return sensing
 
     def receive_perception_callback(self, msg):
@@ -357,11 +357,11 @@ class CognitiveProcess:
                 self.perception_cache[sensor]["data"] = copy(perception_dict[sensor])
                 if Time.from_msg(msg.timestamp).nanoseconds > self.perception_time:
                     self.perception_cache[sensor]["flag"].set()
-                self.node.get_logger().debug(
+                self.get_logger().debug(
                     f'Receiving perception: {sensor} {self.perception_cache[sensor]["data"]} ...'
                 )
             else:
-                self.node.get_logger().error(
+                self.get_logger().error(
                     "Received sensor not registered in local perception cache!!!"
                 )
 
@@ -383,15 +383,15 @@ class CognitiveProcess:
                     for attribute in perception:
                         difference = abs(perception[attribute] - perception_old[attribute])
                         if difference > threshold:
-                            self.node.get_logger().debug("Sensorial change detected")
+                            self.get_logger().debug("Sensorial change detected")
                             self.sensorial_changes_val = True
                             return True
                 else:
                     if abs(perception[0] - perception_old[0]) > threshold:
-                        self.node.get_logger().debug("Sensorial change detected")
+                        self.get_logger().debug("Sensorial change detected")
                         self.sensorial_changes_val = True
                         return True
-        self.node.get_logger().debug("No sensorial change detected")
+        self.get_logger().debug("No sensorial change detected")
         self.sensorial_changes_val = False
         return False
 
@@ -404,18 +404,18 @@ class CognitiveProcess:
         This method updates the activations of the nodes in the LTM cache.
         """
 
-        self.node.get_logger().info("Updating activations...")
+        self.get_logger().info("Updating activations...")
         self.semaphore.acquire()
-        self.activation_time=self.node.get_clock().now().nanoseconds
+        self.activation_time=self.get_clock().now().nanoseconds
         for node in self.activation_inputs:
             self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
-            self.node.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
+            self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
         self.semaphore.release()
-        self.node.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+        self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
     def request_activation(self, name, sensing):
         """
@@ -446,12 +446,12 @@ class CognitiveProcess:
         :type node_type: str
         """
         if name not in self.activation_inputs:
-            subscriber=self.node.create_subscription(Activation, 'cognitive_node/' + str(name) + '/activation', self.read_activation_callback, 1, callback_group=self.cbgroup_server)
+            subscriber=self.create_subscription(Activation, 'cognitive_node/' + str(name) + '/activation', self.read_activation_callback, 1, callback_group=self.cbgroup_server)
             flag=threading.Event()
             self.activation_inputs[name]=dict(node_type=node_type, subscriber=subscriber, flag=flag)
-            self.node.get_logger().debug(f'Created new activation input: {name} of type {node_type}')
+            self.get_logger().debug(f'Created new activation input: {name} of type {node_type}')
         else:
-            self.node.get_logger().error(f'Tried to add {name} to activation inputs more than once')
+            self.get_logger().error(f'Tried to add {name} to activation inputs more than once')
     
     def delete_activation_input(self, name): #Deletes a node from the activation inputs list. By default reads activations.
         """
@@ -461,7 +461,7 @@ class CognitiveProcess:
         :type name: str
         """
         if name in self.activation_inputs:
-            self.node.destroy_subscription(self.activation_inputs[name])
+            self.destroy_subscription(self.activation_inputs[name])
             self.activation_inputs.pop(name)
 
 
@@ -484,7 +484,7 @@ class CognitiveProcess:
         if timestamp > self.activation_time :            
             self.activation_inputs[node_name]['flag'].set()
         elif timestamp < old_timestamp:
-            self.node.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
+            self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
 
     def read_activation_callback(self, msg: Activation):
         """
@@ -505,7 +505,7 @@ class CognitiveProcess:
         if timestamp > self.activation_time :            
             self.activation_inputs[node_name]['flag'].set()
         elif timestamp < old_timestamp:
-            self.node.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
+            self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
         
 
     # =========================
@@ -535,8 +535,8 @@ class CognitiveProcess:
 
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point=perception, confidence=1.0)
-        self.node.get_logger().info(f"Added point in pnode {name}")
-        self.node.get_logger().debug(f"POINT: {str(sensing)}")
+        self.get_logger().info(f"Added point in pnode {name}")
+        self.get_logger().debug(f"POINT: {str(sensing)}")
         return response.added
 
     def add_antipoint(self, name, sensing):
@@ -559,8 +559,8 @@ class CognitiveProcess:
 
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point=perception, confidence=-1.0)
-        self.node.get_logger().info(f"Added anti-point in pnode {name}")
-        self.node.get_logger().debug(f"ANTI-POINT: {str(sensing)}")
+        self.get_logger().info(f"Added anti-point in pnode {name}")
+        self.get_logger().debug(f"ANTI-POINT: {str(sensing)}")
         return response.added
 
     def new_cnode(self, perception, goal, policy):
@@ -575,7 +575,7 @@ class CognitiveProcess:
         :type policy: str
         """
 
-        self.node.get_logger().info("Creating Cnode...")
+        self.get_logger().info("Creating Cnode...")
         world_model = self.get_current_world_model()
         ident = f"{world_model}__{goal}__{policy}"
 
@@ -589,7 +589,7 @@ class CognitiveProcess:
         )
 
         if not pnode:
-            self.node.get_logger().fatal(f"Failed creation of PNode {pnode_name}")
+            self.get_logger().fatal(f"Failed creation of PNode {pnode_name}")
         self.add_point(pnode_name, perception)
 
         neighbor_dict = {world_model: "WorldModel", pnode_name: "PNode", goal: "Goal"}
@@ -605,7 +605,7 @@ class CognitiveProcess:
         policy_success=self.add_neighbor(policy, cnode_name) 
 
         if not cnode or not policy_success:
-            self.node.get_logger().fatal(f"Failed creation of CNode {cnode_name}")
+            self.get_logger().fatal(f"Failed creation of CNode {cnode_name}")
 
         self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of deleting CNodes
         return cnode_name
@@ -621,7 +621,7 @@ class CognitiveProcess:
         :return: Name of the created Goal node.
         :rtype: str
         """
-        self.node.get_logger().info("Creating Goal...")
+        self.get_logger().info("Creating Goal...")
         goal_name = f"goal_{self.n_goals}"
         goal_class = self.default_class.get("Goal")
         space_class = self.default_class.get("Space")
@@ -639,7 +639,7 @@ class CognitiveProcess:
         )
         self.n_goals+=1
         if not goal:
-            self.node.get_logger().fatal(f"Failed creation of Goal {goal_name}")
+            self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
         return goal_name
 
     def create_node_client(self, name, class_name, parameters={}):
@@ -656,7 +656,7 @@ class CognitiveProcess:
         :rtype: bool
         """
 
-        self.node.get_logger().info("Requesting node creation")
+        self.get_logger().info("Requesting node creation")
         params_str = yaml.dump(parameters, sort_keys=False)
         service_name = "commander/create"
         if service_name not in self.node_clients:
@@ -679,7 +679,7 @@ class CognitiveProcess:
         data_dict = self.get_node_data(name, self.LTM_cache)
         neighbors = data_dict["neighbors"]
 
-        self.node.get_logger().debug(f"REQUESTED NEIGHBORS: {neighbors}")
+        self.get_logger().debug(f"REQUESTED NEIGHBORS: {neighbors}")
 
         return neighbors
     
@@ -716,7 +716,7 @@ class CognitiveProcess:
         node_activations = {}
         for node, data in self.LTM_cache[node_type].items():
             node_activations[node] = data["activation"]
-        self.node.get_logger().info(f"Selecting most activated {node_type} - Activations: {node_activations}")
+        self.get_logger().info(f"Selecting most activated {node_type} - Activations: {node_activations}")
         selected = max(zip(node_activations.values(), node_activations.keys()))[1]
         return selected, node_activations
     
@@ -826,7 +826,7 @@ class CognitiveProcess:
         :return: Dictionary with goal names as keys and their corresponding rewards as values.
         :rtype: dict
         """
-        self.node.get_logger().info("Reading rewards...")
+        self.get_logger().info("Reading rewards...")
         rewards = {}
         old_perception = perception_dict_to_msg(old_sensing)
         perception = perception_dict_to_msg(sensing)
@@ -858,7 +858,7 @@ class CognitiveProcess:
                     reward = self.node_clients[service_name].send_request()
                     rewards[drive] = reward.reward
                     updated_reward=reward.updated
-        self.node.get_logger().info(f"Reward_list: {rewards}")
+        self.get_logger().info(f"Reward_list: {rewards}")
         return rewards
 
     def get_unlinked_drives(self):
@@ -889,7 +889,7 @@ class CognitiveProcess:
         :rtype: str
         """
         WM, WM_activations = self.get_max_activation_node("WorldModel")
-        self.node.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
+        self.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
 
         return WM
     
@@ -904,7 +904,7 @@ class CognitiveProcess:
         """
         needs = self.get_all_active_nodes("Need", ltm_cache)
 
-        self.node.get_logger().info(f"Active Needs: {needs}")
+        self.get_logger().info(f"Active Needs: {needs}")
                     
         return needs
     
@@ -919,7 +919,7 @@ class CognitiveProcess:
         :return: Dictionary with need names as keys and their satisfaction status as values.
         :rtype: dict
         """
-        self.node.get_logger().info("Reading satisfaction...")
+        self.get_logger().info("Reading satisfaction...")
         satisfaction = {}
         response=IsSatisfied.Response()
         for need in need_list:
@@ -933,7 +933,7 @@ class CognitiveProcess:
             satisfaction[need] = dict(satisfied=response.satisfied, need_type=response.need_type)
             response.updated = False
 
-        self.node.get_logger().info(f"Satisfaction list: {satisfaction}")
+        self.get_logger().info(f"Satisfaction list: {satisfaction}")
 
         return satisfaction
     

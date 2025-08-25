@@ -41,7 +41,7 @@ class MainLoop(CognitiveProcess):
     # =========================
     # INITIALIZATION & SETUP
     # =========================
-    def __init__(self, node: Node, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
+    def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
         """
         Constructor for the MainLoop class.
         Initializes the MainLoop node and starts the main loop execution.
@@ -51,7 +51,7 @@ class MainLoop(CognitiveProcess):
         :param name: The name of the MainLoop node.
         :type name: str
         """
-        super().__init__(node, **params)
+        super().__init__(name, **params)
         
         # --- Reward and policy selection ---
         self.reward_threshold = 0.9
@@ -105,11 +105,11 @@ class MainLoop(CognitiveProcess):
         Configures the output files.
         """ 
         if hasattr(self, "Files"):
-            self.node.get_logger().info("Files detected, loading files...")
+            self.get_logger().info("Files detected, loading files...")
             for file_item in self.Files:
                 self.add_file(file_item)
         else:
-            self.node.get_logger().info("No files detected...")
+            self.get_logger().info("No files detected...")
 
     def add_file(self, file_item):
         """
@@ -136,8 +136,8 @@ class MainLoop(CognitiveProcess):
         Method that writes the files with execution data.
         """
 
-        self.node.get_logger().info("Writing files publishing status...")
-        self.node.get_logger().debug(f"DEBUG: {self.pnodes_success}")
+        self.get_logger().info("Writing files publishing status...")
+        self.get_logger().debug(f"DEBUG: {self.pnodes_success}")
         for file in self.files:
             if file.file_object is None:
                 file.write_header()
@@ -147,7 +147,7 @@ class MainLoop(CognitiveProcess):
         """
         Close all files when execution is finished.
         """
-        self.node.get_logger().info("Closing files...")
+        self.get_logger().info("Closing files...")
         for file in self.files:
             file.close()
     
@@ -195,8 +195,8 @@ class MainLoop(CognitiveProcess):
 
         for policy in policies:
             all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
-        self.node.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
-        self.node.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
+        self.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
+        self.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
         if not policy_activations:
             policy_pool = all_policy_activations
         else:
@@ -208,13 +208,13 @@ class MainLoop(CognitiveProcess):
             selected= self.select_max_policy(policy_pool)
 
 
-        self.node.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
-        self.node.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
+        self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
+        self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
         if not policy_pool[selected]:
             selected = self.random_policy()
 
-        self.node.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
 
         return selected
     
@@ -253,7 +253,7 @@ class MainLoop(CognitiveProcess):
 
         # Select a policy based on the probabilities
         selected = self.rng.choice(policy_names, p=probabilities)
-        self.node.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
+        self.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
         return selected
 
     def random_policy(self):
@@ -349,7 +349,7 @@ class MainLoop(CognitiveProcess):
         :type ltm_cache: dict
         """
 
-        self.node.get_logger().info("Updating p-nodes/c-nodes...")
+        self.get_logger().info("Updating p-nodes/c-nodes...")
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
         cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
@@ -409,7 +409,7 @@ class MainLoop(CognitiveProcess):
                 updates = True
 
         if not updates:
-            self.node.get_logger().info("No update required in PNode/CNodes")
+            self.get_logger().info("No update required in PNode/CNodes")
 
     def add_point(self, name, sensing):
         response = super().add_point(name, sensing)
@@ -465,10 +465,10 @@ class MainLoop(CognitiveProcess):
                 self.last_reset=self.iteration
 
             if getattr(self, "world_reset_client", None):
-                self.node.get_logger().info("Requesting world reset service...")
+                self.get_logger().info("Requesting world reset service...")
                 self.world_reset_client.send_request(iteration=self.iteration, world=self.current_world)
             else:
-                self.node.get_logger().info("Asking for a world reset...")
+                self.get_logger().info("Asking for a world reset...")
                 msg = ControlMsg()
                 msg.command = "reset_world"
                 msg.world = self.current_world
@@ -483,7 +483,7 @@ class MainLoop(CognitiveProcess):
         :return: True if the world has finished, False otherwise.
         :rtype: bool
         """
-        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.node.get_clock().now())
+        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
         if len(need_satisfaction)>0:
             finished = any((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
         else:
@@ -498,7 +498,7 @@ class MainLoop(CognitiveProcess):
         Run the main loop of the system.
         """
 
-        self.node.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
+        self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
 
         self.current_world = self.get_current_world_model()
         self.reset_world()
@@ -512,7 +512,7 @@ class MainLoop(CognitiveProcess):
 
             if not self.paused:
 
-                self.node.get_logger().info(
+                self.get_logger().info(
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.publish_iteration()
@@ -525,7 +525,7 @@ class MainLoop(CognitiveProcess):
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 
-                self.node.get_logger().info(
+                self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.current_episode.old_perception} \n     sensing: {self.current_episode.perception}"
                 )
 
@@ -565,7 +565,7 @@ class MainLoopLight(MainLoop):
     MainLoopLight class for running the main loop with only action selection
     """
 
-    def __init__(self, node: Node, **params):
+    def __init__(self, name, **params):
         """
         Constructor for the MainLoopLight class.
         Initializes the MainLoopLight node and starts the main loop execution.
@@ -573,7 +573,7 @@ class MainLoopLight(MainLoop):
         :param node: The ROS2 Node instance.
         :type node: rclpy.node.Node
         """
-        super().__init__(node, **params)
+        super().__init__(name, **params)
 
     def select_policy(self, softmax=False):
         """
@@ -593,8 +593,8 @@ class MainLoopLight(MainLoop):
             selected = self.select_policy_softmax(policy_pool, self.softmax_temperature)
         else: 
             selected= self.select_max_policy(policy_pool)
-        self.node.get_logger().info("Select_policy - Activations: " + str(policy_pool))
-        self.node.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        self.get_logger().info("Select_policy - Activations: " + str(policy_pool))
+        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
         return selected
     
     def execute_policy(self, perception, policy):
@@ -611,7 +611,7 @@ class MainLoopLight(MainLoop):
         """
         node_type = self.get_node_type(policy, self.LTM_cache)
         if node_type not in ["Policy", "UtilityModel"]:
-            self.node.get_logger().error(f"Invalid node type for policy execution: {node_type}")
+            self.get_logger().error(f"Invalid node type for policy execution: {node_type}")
             return None, None
         elif node_type == "UtilityModel":
             service_name = "utility_model/" + str(policy) + "/execute"
@@ -622,7 +622,7 @@ class MainLoopLight(MainLoop):
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
         action= policy_response.action
-        self.node.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
+        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, action 
 
     def run(self):
@@ -630,7 +630,7 @@ class MainLoopLight(MainLoop):
         Run the main loop of the system.
         """
 
-        self.node.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
+        self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
 
         self.current_world = self.get_current_world_model()
         self.reset_world()
@@ -642,7 +642,7 @@ class MainLoopLight(MainLoop):
 
             if not self.paused:
 
-                self.node.get_logger().info(
+                self.get_logger().info(
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.publish_iteration()
@@ -655,7 +655,7 @@ class MainLoopLight(MainLoop):
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 
-                self.node.get_logger().info(
+                self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.current_episode.old_perception} \n     sensing: {self.current_episode.perception}"
                 )
 
@@ -688,22 +688,11 @@ class MainLoopLight(MainLoop):
         if self.kill_on_finish:
             self.kill_commander_client.send_request()
 
-class MainLoopNode(Node):
-    """
-    MainLoopNode class for running the main loop as a ROS2 node.
-    """
-
-    def __init__(self, name, main_loop_class=None, **params):
-        super().__init__(name)
-        if main_loop_class is None:
-            raise ValueError("main_loop_class must be provided")
-        self.main_loop = class_from_classname(main_loop_class)(self, **params)
-
 def main(args=None):
     rclpy.init()
 
     executor = MultiThreadedExecutor(num_threads=2)
-    node = MainLoopNode("main_loop_node", main_loop_class="cognitive_processes.main_loop.MainLoop")
+    node = MainLoop("main_loop")
 
     executor.add_node(node)
     node.get_logger().info("Running node")
