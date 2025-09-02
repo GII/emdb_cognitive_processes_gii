@@ -664,9 +664,9 @@ class MainLoop(Node):
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
         action= policy_response.action
-        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
-        return policy_response.policy, action 
-    
+        self.get_logger().info(f"Executed policy {policy_response.policy}... with perception {perception}")
+        return policy_response.policy, action
+
     def get_goals(self, ltm_cache):
         """
         This method retrieves all active goals from the LTM cache.
