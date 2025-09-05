@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath("../../cognitive_processes"))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "e-MDB Cognitive processes implemented by the GII"
-copyright = "2024, GII"
+copyright = "2025, GII"
 author = "GII"
 release = "Apache-2.0"
 
