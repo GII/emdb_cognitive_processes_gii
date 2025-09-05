@@ -1259,6 +1259,7 @@ class MainLoop(Node):
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.update_activations()
                 self.stm.ltm_state=deepcopy(self.LTM_cache)
+                self.current_world = self.get_current_world_model()
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
