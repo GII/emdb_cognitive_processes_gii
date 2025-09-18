@@ -1252,6 +1252,7 @@ class MainLoop(Node):
                 )
                 self.publish_iteration()
                 self.update_activations()
+                self.current_world = self.get_current_world_model()
                 self.stm.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
@@ -1259,7 +1260,6 @@ class MainLoop(Node):
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
                 self.update_activations()
                 self.stm.ltm_state=deepcopy(self.LTM_cache)
-                self.current_world = self.get_current_world_model()
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
