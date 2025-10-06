@@ -96,6 +96,22 @@ class MainLoop(CognitiveProcess):
         self.setup_files()
         self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
 
+    def setup_control_channel(self):
+        super().setup_control_channel()
+        episodes_msg=self.Control["episodes_msg"]
+        episodes_topic=self.Control["episodes_topic"]
+        self.episode_subscriber = self.create_subscription(class_from_classname(episodes_msg), episodes_topic, self.receive_episode_callback, 1, callback_group=self.cbgroup_client)
+
+    # =========================
+    # EPISODE HANDLING
+    # =========================
+
+    def receive_episode_callback(self, msg):
+       for file in self.files:
+            if file.file_object is None:
+                file.write_header()
+            file.write_episode(msg)
+
     # =========================
     # File Handling
     # =========================
@@ -160,7 +176,8 @@ class MainLoop(CognitiveProcess):
         """
         msg = ControlMsg()
         msg.command = ""
-        msg.world = self.current_world
+        current_world = self.current_world if self.current_world else "None"
+        msg.world = current_world
         msg.iteration = self.iteration
         self.control_publisher.publish(msg)
 
@@ -463,15 +480,15 @@ class MainLoop(CognitiveProcess):
                 self.trials_data.append((self.iteration, self.goal_count, iterations, finished))
                 self.goal_count+=1
                 self.last_reset=self.iteration
-
+            current_world = self.current_world if self.current_world else "None"
             if getattr(self, "world_reset_client", None):
                 self.get_logger().info("Requesting world reset service...")
-                self.world_reset_client.send_request(iteration=self.iteration, world=self.current_world)
+                self.world_reset_client.send_request(iteration=self.iteration, world=current_world)
             else:
                 self.get_logger().info("Asking for a world reset...")
                 msg = ControlMsg()
                 msg.command = "reset_world"
-                msg.world = self.current_world
+                msg.world = current_world
                 msg.iteration = self.iteration
                 self.control_publisher.publish(msg)
         return changed

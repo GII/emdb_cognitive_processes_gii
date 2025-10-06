@@ -716,6 +716,8 @@ class CognitiveProcess(Node):
         node_activations = {}
         for node, data in self.LTM_cache[node_type].items():
             node_activations[node] = data["activation"]
+        if not node_activations:
+            return None, {}
         self.get_logger().info(f"Selecting most activated {node_type} - Activations: {node_activations}")
         selected = max(zip(node_activations.values(), node_activations.keys()))[1]
         return selected, node_activations
@@ -889,8 +891,10 @@ class CognitiveProcess(Node):
         :rtype: str
         """
         WM, WM_activations = self.get_max_activation_node("WorldModel")
-        self.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
-
+        if WM is None:
+            self.get_logger().info("No World Model found in LTM")
+        else:
+            self.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
         return WM
     
     def get_needs(self, ltm_cache):

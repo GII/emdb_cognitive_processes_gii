@@ -8,7 +8,8 @@ from scipy.stats.qmc import LatinHypercube
 from cognitive_processes.cognitive_process import CognitiveProcess
 from core.service_client import ServiceClient
 
-from cognitive_node_interfaces.srv import Predict
+from cognitive_node_interfaces.srv import AddPoints, Predict
+from core.utils import perception_dict_to_msg
 
 
 class Deliberation(CognitiveProcess):
@@ -297,13 +298,24 @@ class Deliberation(CognitiveProcess):
             self.get_logger().info("No update required in PNode/CNodes")
 
     def add_pnode_trace(self, pnode, trace):
-        for episode, _ in trace:
-            self.add_point(pnode, episode.old_perception)
-    
-    def add_pnode_antitrace(self, pnode, antitrace):
-        for episode, _ in antitrace:
-            self.add_antipoint(pnode, episode.old_perception)
+        confidences = list(np.ones(len(trace)))
+        added = self.add_pnode_points(pnode, trace, confidences)
+        return added
 
+    def add_pnode_antitrace(self, pnode, antitrace):
+        confidences = list(np.zeros(len(antitrace)))
+        added = self.add_pnode_points(pnode, antitrace, confidences)
+        return added
+
+    def add_pnode_points(self, pnode, trace, confidences):
+        service_name = "pnode/" + str(pnode) + "/add_points"
+        if service_name not in self.node_clients:
+            self.node_clients[service_name] = ServiceClient(
+                AddPoints, service_name
+            )
+        points = [perception_dict_to_msg(episode.old_perception) for episode, _ in trace]
+        response = self.node_clients[service_name].send_request(points=points, confidences=confidences)
+        return response.added
 
     def deliberation_cycle(self):
         self.start_flag.wait()
