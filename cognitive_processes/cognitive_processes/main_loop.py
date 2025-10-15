@@ -638,7 +638,7 @@ class MainLoopLight(MainLoop):
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        action= policy_response.action
+        action= actuation_msg_to_dict(policy_response.action)
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, action 
 
@@ -688,8 +688,11 @@ class MainLoopLight(MainLoop):
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
+                    self.current_episode.old_perception = self.current_episode.perception
                     self.current_episode.perception = reset_sensing
                     self.current_episode.ltm_state = self.LTM_cache
+                    self.current_episode.parent_policy = "reset_world"
+                    self.publish_episode()
 
                 self.update_policies_to_test(
                     policy=(
