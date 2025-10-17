@@ -897,44 +897,44 @@ class CognitiveProcess(Node):
             self.get_logger().info(f"Selecting world model with highest activation: {WM} ({WM_activations[WM]})")
         return WM
     
-    def get_needs(self, ltm_cache):
+    def get_purposes(self, ltm_cache):
         """
-        This method retrieves all active needs from the LTM cache.
+        This method retrieves all active purposes from the LTM cache.
 
         :param ltm_cache: LTM cache containing the nodes and their data.
         :type ltm_cache: dict
-        :return: List of active needs.
+        :return: List of active purposes.
         :rtype: list
         """
-        needs = self.get_all_active_nodes("Need", ltm_cache)
+        purposes = self.get_all_active_nodes("RobotPurpose", ltm_cache)
 
-        self.get_logger().info(f"Active Needs: {needs}")
+        self.get_logger().info(f"Active Purposes: {purposes}")
                     
-        return needs
+        return purposes
     
-    def get_need_satisfaction(self, need_list, timestamp):
+    def get_purpose_satisfaction(self, purpose_list, timestamp):
         """
-        This method retrieves the satisfaction of each need in the need_list.
+        This method retrieves the satisfaction of each purpose in the purpose_list.
 
-        :param need_list: List of needs.
-        :type need_list: list
+        :param purpose_list: List of purposes.
+        :type purpose_list: list
         :param timestamp: Timestamp to be used for the request.
         :type timestamp: rclpy.time.Time
-        :return: Dictionary with need names as keys and their satisfaction status as values.
+        :return: Dictionary with purpose names as keys and their satisfaction status as values.
         :rtype: dict
         """
         self.get_logger().info("Reading satisfaction...")
         satisfaction = {}
         response=IsSatisfied.Response()
-        for need in need_list:
-            service_name = "need/" + str(need) + "/get_satisfaction"
+        for purpose in purpose_list:
+            service_name = "robot_purpose/" + str(purpose) + "/get_satisfaction"
             if service_name not in self.node_clients:
                 self.node_clients[service_name] = ServiceClient(IsSatisfied, service_name)
             while not response.updated:
                 response = self.node_clients[service_name].send_request(
                     timestamp=timestamp.to_msg()
                 )
-            satisfaction[need] = dict(satisfied=response.satisfied, need_type=response.need_type)
+            satisfaction[purpose] = dict(satisfied=response.satisfied, purpose_type=response.purpose_type, terminal=response.terminal)
             response.updated = False
 
         self.get_logger().info(f"Satisfaction list: {satisfaction}")
