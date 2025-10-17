@@ -484,13 +484,12 @@ class MainLoop(CognitiveProcess):
             if getattr(self, "world_reset_client", None):
                 self.get_logger().info("Requesting world reset service...")
                 self.world_reset_client.send_request(iteration=self.iteration, world=current_world)
-            else:
-                self.get_logger().info("Asking for a world reset...")
-                msg = ControlMsg()
-                msg.command = "reset_world"
-                msg.world = current_world
-                msg.iteration = self.iteration
-                self.control_publisher.publish(msg)
+            self.get_logger().info("Asking for a world reset...")
+            msg = ControlMsg()
+            msg.command = "reset_world"
+            msg.world = current_world
+            msg.iteration = self.iteration
+            self.control_publisher.publish(msg)
         return changed
     
     def world_finished(self):
@@ -500,9 +499,9 @@ class MainLoop(CognitiveProcess):
         :return: True if the world has finished, False otherwise.
         :rtype: bool
         """
-        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
-        if len(need_satisfaction)>0:
-            finished = any((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
+        purpose_satisfaction = self.get_purpose_satisfaction(self.get_purposes(self.LTM_cache), self.get_clock().now())
+        if len(purpose_satisfaction)>0:
+            finished = any((purpose_satisfaction[purpose]['satisfied'] and purpose_satisfaction[purpose]['terminal'] for purpose in purpose_satisfaction))
         else:
             finished=False
         return finished
