@@ -73,7 +73,7 @@ class MainLoop(Node):
         self.LTM_id = ""  # id of LTM currently being run by cognitive loop
         self.LTM_cache = (
             {}
-        )  # Nested dics, like {'CNode': {'CNode1': {'activation': 0.0}}, 'Drive': {...}, 'Goal': {...}, 'Need': {...}, 'Policy': {...}, 'Perception': {...},'PNode': {...}, 'UtilityModel': {...}, 'WorldModel': {...}}
+        )  # Nested dics, like {'CNode': {'CNode1': {'activation': 0.0}}, 'Drive': {...}, 'Goal': {...}, 'RobotPurpose': {...}, 'Policy': {...}, 'Perception': {...},'PNode': {...}, 'UtilityModel': {...}, 'WorldModel': {...}}
         self.stm = Episode()
         self.default_class = {}
         self.perception_suscribers = {}
@@ -761,44 +761,44 @@ class MainLoop(Node):
 
         return WM
     
-    def get_needs(self, ltm_cache):
+    def get_purposes(self, ltm_cache):
         """
-        This method retrieves all active needs from the LTM cache.
+        This method retrieves all active purposes from the LTM cache.
 
         :param ltm_cache: LTM cache containing the nodes and their data.
         :type ltm_cache: dict
-        :return: List of active needs.
+        :return: List of active purposes.
         :rtype: list
         """
-        needs = self.get_all_active_nodes("Need", ltm_cache)
+        purposes = self.get_all_active_nodes("RobotPurpose", ltm_cache)
 
-        self.get_logger().info(f"Active Needs: {needs}")
+        self.get_logger().info(f"Active Purposes: {purposes}")
                     
-        return needs
+        return purposes
     
-    def get_need_satisfaction(self, need_list, timestamp):
+    def get_purpose_satisfaction(self, purpose_list, timestamp):
         """
-        This method retrieves the satisfaction of each need in the need_list.
+        This method retrieves the satisfaction of each purpose in the purpose_list.
 
-        :param need_list: List of needs.
-        :type need_list: list
+        :param purpose_list: List of purposes.
+        :type purpose_list: list
         :param timestamp: Timestamp to be used for the request.
         :type timestamp: rclpy.time.Time
-        :return: Dictionary with need names as keys and their satisfaction status as values.
+        :return: Dictionary with purpose names as keys and their satisfaction status as values.
         :rtype: dict
         """
         self.get_logger().info("Reading satisfaction...")
         satisfaction = {}
         response=IsSatisfied.Response()
-        for need in need_list:
-            service_name = "need/" + str(need) + "/get_satisfaction"
+        for purpose in purpose_list:
+            service_name = "robot_purpose/" + str(purpose) + "/get_satisfaction"
             if service_name not in self.node_clients:
                 self.node_clients[service_name] = ServiceClient(IsSatisfied, service_name)
             while not response.updated:
                 response = self.node_clients[service_name].send_request(
                     timestamp=timestamp.to_msg()
                 )
-            satisfaction[need] = dict(satisfied=response.satisfied, need_type=response.need_type)
+            satisfaction[purpose] = dict(satisfied=response.satisfied, purpose_type=response.purpose_type, terminal=response.terminal)
             response.updated = False
 
         self.get_logger().info(f"Satisfaction list: {satisfaction}")
@@ -1172,13 +1172,12 @@ class MainLoop(Node):
             if getattr(self, "world_reset_client", None):
                 self.get_logger().info("Requesting world reset service...")
                 self.world_reset_client.send_request(iteration=self.iteration, world=self.current_world)
-            else:
-                self.get_logger().info("Asking for a world reset...")
-                msg = ControlMsg()
-                msg.command = "reset_world"
-                msg.world = self.current_world
-                msg.iteration = self.iteration
-                self.control_publisher.publish(msg)
+            self.get_logger().info("Asking for a world reset...")
+            msg = ControlMsg()
+            msg.command = "reset_world"
+            msg.world = self.current_world
+            msg.iteration = self.iteration
+            self.control_publisher.publish(msg)
         return changed
     
     def world_finished(self):
@@ -1188,9 +1187,9 @@ class MainLoop(Node):
         :return: True if the world has finished, False otherwise.
         :rtype: bool
         """
-        need_satisfaction = self.get_need_satisfaction(self.get_needs(self.LTM_cache), self.get_clock().now())
-        if len(need_satisfaction)>0:
-            finished = any((need_satisfaction[need]['satisfied'] for need in need_satisfaction if (need_satisfaction[need]['need_type'] == 'Operational')))
+        purpose_satisfaction = self.get_purpose_satisfaction(self.get_purposes(self.LTM_cache), self.get_clock().now())
+        if len(purpose_satisfaction)>0:
+            finished = any((purpose_satisfaction[purpose]['satisfied'] and purpose_satisfaction[purpose]['terminal'] for purpose in purpose_satisfaction))
         else:
             finished=False
         return finished
