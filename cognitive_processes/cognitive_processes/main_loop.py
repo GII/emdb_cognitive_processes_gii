@@ -100,13 +100,6 @@ class MainLoop(Node):
         self.goal_count=0
         self.trials_data=[]
         self.last_reset=0
-        self.max_cache_nodes = 500  # Límite de nodos en LTM cache
-        self.max_clients = 200      # Límite de service clients
-        self.cleanup_interval = 50  # Limpiar cada 50 iteraciones
-        
-        # World finish check optimization - check every N iterations instead of every iteration
-        self.world_finish_check_interval = 10
-        self._cached_world_finished = False
 
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
         self.cbgroup_server = MutuallyExclusiveCallbackGroup()
@@ -145,9 +138,6 @@ class MainLoop(Node):
         self.setup_control_channel()
         self.LTM_changes_client.send_request(changes_topic=True)
         self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
-
-        ## initial time
-        self.start_time = self.get_clock().now().nanoseconds
 
     def read_ltm(self, ltm_dump=None):
         """
@@ -674,9 +664,9 @@ class MainLoop(Node):
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
         action= policy_response.action
-        self.get_logger().info(f"Executed policy {policy_response.policy}... with perception {perception}")
-        return policy_response.policy, action
-
+        self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
+        return policy_response.policy, action 
+    
     def get_goals(self, ltm_cache):
         """
         This method retrieves all active goals from the LTM cache.
@@ -702,14 +692,12 @@ class MainLoop(Node):
         :return: Dictionary with goal names as keys and their corresponding rewards as values.
         :rtype: dict
         """
-        t_start = self.get_clock().now().nanoseconds
-        self.get_logger().debug("Reading rewards...")
+        self.get_logger().info("Reading rewards...")
         rewards = {}
         old_perception = perception_dict_to_msg(old_sensing)
         perception = perception_dict_to_msg(sensing)
 
         for goal in self.active_goals:
-            t_goal_start = self.get_clock().now().nanoseconds
             updated_reward=False
             while not updated_reward:
                 service_name = "goal/" + str(goal) + "/get_reward"
@@ -720,9 +708,6 @@ class MainLoop(Node):
                 )
                 rewards[goal] = reward.reward
                 updated_reward=reward.updated
-            t_goal_end = self.get_clock().now().nanoseconds
-            if self.iteration % 10 == 0:
-                self.get_logger().debug(f"  Goal {goal} reward: {(t_goal_end-t_goal_start)/1e6:.1f}ms")
 
         #Add rewards obtained from unlinked drives
         if self.unlinked_drives:
@@ -731,7 +716,6 @@ class MainLoop(Node):
                 if ltm_cache.get("Drive", {}).get(drive, {}).get("activation", 0) > self.activation_threshold
             ]
             for drive in active_drives:
-                t_drive_start = self.get_clock().now().nanoseconds
                 updated_reward=False
                 while not updated_reward:
                     service_name = "drive/" + str(drive) + "/get_reward"
@@ -740,14 +724,7 @@ class MainLoop(Node):
                     reward = self.node_clients[service_name].send_request()
                     rewards[drive] = reward.reward
                     updated_reward=reward.updated
-                t_drive_end = self.get_clock().now().nanoseconds
-                if self.iteration % 10 == 0:
-                    self.get_logger().debug(f"  Drive {drive} reward: {(t_drive_end-t_drive_start)/1e6:.1f}ms")
-        
-        t_end = self.get_clock().now().nanoseconds
-        if self.iteration % 10 == 0:
-            self.get_logger().info(f"Total rewards ({len(rewards)} items): {(t_end-t_start)/1e6:.1f}ms")
-        self.get_logger().debug(f"Reward_list: {rewards}")
+        self.get_logger().info(f"Reward_list: {rewards}")
         return rewards
 
     def get_unlinked_drives(self):
@@ -810,33 +787,21 @@ class MainLoop(Node):
         :return: Dictionary with purpose names as keys and their satisfaction status as values.
         :rtype: dict
         """
-        self.get_logger().debug("Reading satisfaction...")
+        self.get_logger().info("Reading satisfaction...")
         satisfaction = {}
         response=IsSatisfied.Response()
         for purpose in purpose_list:
             service_name = "robot_purpose/" + str(purpose) + "/get_satisfaction"
             if service_name not in self.node_clients:
                 self.node_clients[service_name] = ServiceClient(IsSatisfied, service_name)
-            
-            # Timeout counter to avoid infinite loops
-            max_attempts = 5
-            attempts = 0
-            
-            while not response.updated and attempts < max_attempts:
-                self.get_logger().debug(f"Called service: {service_name} (attempt {attempts + 1}/{max_attempts})...")
+            while not response.updated:
                 response = self.node_clients[service_name].send_request(
                     timestamp=timestamp.to_msg()
                 )
-                self.get_logger().debug(f"Called satisfaction service: {service_name}. Updated: {response.updated} ...")
-                attempts += 1
-            
-            if not response.updated:
-                self.get_logger().warn(f"Timeout waiting for updated satisfaction from {purpose} after {max_attempts} attempts")
-            
             satisfaction[purpose] = dict(satisfied=response.satisfied, purpose_type=response.purpose_type, terminal=response.terminal)
             response.updated = False
 
-        self.get_logger().debug(f"Satisfaction list: {satisfaction}")
+        self.get_logger().info(f"Satisfaction list: {satisfaction}")
 
         return satisfaction
 
@@ -1178,7 +1143,6 @@ class MainLoop(Node):
         response = self.node_clients[service_name].send_request(
             name=name, class_name=class_name, parameters=params_str
         )
-        self.get_logger().info(f"Node creation response received: {response}")
         return response.created
     
 
@@ -1196,14 +1160,10 @@ class MainLoop(Node):
 
         changed = False
         self.trial += 1
-        
-        # Optimize: Only check world_finished periodically, not every iteration
         if check_finish:
-            if self.iteration % self.world_finish_check_interval == 0:
-                self._cached_world_finished = self.world_finished()
-            finished = self._cached_world_finished
+            finished = self.world_finished()
         else:
-            finished = False
+            finished=False
 
         if self.trial == self.trials or finished or self.iteration == 0:
             self.trial = 0
@@ -1229,59 +1189,6 @@ class MainLoop(Node):
             self.control_publisher.publish(msg)
         return changed
     
-    def _copy_activations_only(self, ltm_cache):
-        """
-        Copy only activation values and timestamps from LTM cache, not entire cache.
-        This is much faster than deepcopy for large caches.
-        
-        :param ltm_cache: LTM cache containing the nodes and their data.
-        :type ltm_cache: dict
-        :return: Lightweight copy with only activations and timestamps.
-        :rtype: dict
-        """
-        activations_only = {}
-        for node_type, nodes in ltm_cache.items():
-            activations_only[node_type] = {}
-            for node_name, node_data in nodes.items():
-                activations_only[node_type][node_name] = {
-                    'activation': node_data['activation'],
-                    'activation_timestamp': node_data['activation_timestamp'],
-                    'neighbors': node_data['neighbors']  # Keep neighbors for compatibility
-                }
-        return activations_only
-
-    def _cleanup_resources(self):
-        """
-        Periodic cleanup to prevent memory leaks and resource accumulation.
-        Called every cleanup_interval iterations.
-        """
-        self.get_logger().info(f"Running periodic cleanup at iteration {self.iteration}...")
-        
-        # 1. Clean old service clients
-        if len(self.node_clients) > self.max_clients:
-            # Remove oldest 20% of clients (simple FIFO)
-            num_to_remove = len(self.node_clients) // 5
-            clients_to_remove = list(self.node_clients.keys())[:num_to_remove]
-            for client_name in clients_to_remove:
-                try:
-                    self.node_clients.pop(client_name)
-                except Exception as e:
-                    self.get_logger().warn(f"Error removing client {client_name}: {e}")
-            self.get_logger().info(f"Cleaned {num_to_remove} old service clients (was {len(self.node_clients) + num_to_remove}, now {len(self.node_clients)})")
-        
-        # 2. Flush trials_data to prevent unbounded growth
-        if len(self.trials_data) > 100:
-            self.get_logger().info(f"Clearing {len(self.trials_data)} trials_data entries")
-            self.trials_data.clear()
-        
-        # 3. Check LTM cache size
-        total_nodes = sum(len(nodes) for nodes in self.LTM_cache.values())
-        if total_nodes > self.max_cache_nodes:
-            self.get_logger().warn(f"LTM Cache has {total_nodes} nodes (limit: {self.max_cache_nodes}). Consider cleanup.")
-        
-        # 4. Log current memory usage
-        self.get_logger().info(f"Resources: {len(self.node_clients)} clients, {total_nodes} LTM nodes, {len(self.trials_data)} trials")
-
     def world_finished(self):
         """
         Check if the world has finished.
@@ -1347,76 +1254,60 @@ class MainLoop(Node):
         while (self.iteration <= self.iterations) and (not self.stop):
 
             if not self.paused:
-                # === TIMING START ===
                 iter_start = self.get_clock().now().nanoseconds
-                self.end_time = iter_start
-                total_time = (self.end_time - self.start_time) / 1e6
-                self.get_logger().info(f"*** ITERATION: {self.iteration}/{self.iterations} *** Total time: {total_time:.1f} ms")
+
+                self.get_logger().info(
+                    "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
+                )
                 
-                # Reset timer for this iteration
-                self.start_time = iter_start
-                
-                # === 1. Publish iteration ===
                 t1 = self.get_clock().now().nanoseconds
                 self.publish_iteration()
+                
                 t2 = self.get_clock().now().nanoseconds
-                
-                # === 2. Update activations (1st) ===
                 self.update_activations()
+                
                 t3 = self.get_clock().now().nanoseconds
-                
-                # === 3. Get world model + copy cache ===
                 self.current_world = self.get_current_world_model()
-                self.stm.old_ltm_state=self._copy_activations_only(self.LTM_cache)
+                self.stm.old_ltm_state=deepcopy(self.LTM_cache)
+                
                 t4 = self.get_clock().now().nanoseconds
-                
-                # === 4. Select policy ===
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
-                t5 = self.get_clock().now().nanoseconds
                 
-                # === 5. Execute policy ===
+                t5 = self.get_clock().now().nanoseconds
                 self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
                 self.stm.policy = self.current_policy
+                
                 t6 = self.get_clock().now().nanoseconds
-                
-                # === 6. Read perceptions ===
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
+                
                 t7 = self.get_clock().now().nanoseconds
-                
-                # === 7. Update activations (2nd) ===
                 self.update_activations()
-                t8 = self.get_clock().now().nanoseconds
                 
-                # === 8. Copy cache again ===
-                self.stm.ltm_state=self._copy_activations_only(self.LTM_cache)
-                t9 = self.get_clock().now().nanoseconds
+                t8 = self.get_clock().now().nanoseconds
+                self.stm.ltm_state=deepcopy(self.LTM_cache)
 
-                self.get_logger().debug(
-                    f"PERCEPTION: old={self.stm.old_perception}, new={self.stm.perception}"
+                self.get_logger().info(
+                    f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
                 )
 
-                # === 9. Get goals + rewards ===
+                t9 = self.get_clock().now().nanoseconds
                 self.active_goals = self.get_goals(self.stm.old_ltm_state)
                 self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception, self.stm.old_ltm_state)
+
                 t10 = self.get_clock().now().nanoseconds
-
-                # === 10. Publish episode ===
                 self.publish_episode()
+
                 t11 = self.get_clock().now().nanoseconds
-
-                # === 11. Update LTM ===
                 self.update_ltm(self.stm)
-                t12 = self.get_clock().now().nanoseconds
 
-                # === 12. Reset world check ===
+                t12 = self.get_clock().now().nanoseconds
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
                     self.stm.perception = reset_sensing
                     self.stm.ltm_state = self.LTM_cache
-                t13 = self.get_clock().now().nanoseconds
 
-                # === 13. Update policies + status ===
+                t13 = self.get_clock().now().nanoseconds
                 self.update_policies_to_test(
                     policy=(
                         self.current_policy
@@ -1425,8 +1316,9 @@ class MainLoop(Node):
                     )
                 )
                 self.update_status()
-                t14 = self.get_clock().now().nanoseconds
                 
+                t14 = self.get_clock().now().nanoseconds
+
                 # === TIMING BREAKDOWN (every 10 iterations) ===
                 if self.iteration % 10 == 0:
                     self.get_logger().info(
@@ -1446,10 +1338,6 @@ class MainLoop(Node):
                         f"  13. Update status:       {(t14-t13)/1e6:.1f}\n"
                         f"  TOTAL THIS ITER:         {(t14-iter_start)/1e6:.1f}"
                     )
-                
-                # Periodic cleanup to prevent memory leaks
-                if self.iteration % self.cleanup_interval == 0:
-                    self._cleanup_resources()
                 
                 self.iteration += 1
 
