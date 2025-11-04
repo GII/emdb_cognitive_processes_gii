@@ -73,6 +73,7 @@ class MainLoop(CognitiveProcess):
 
         # --- Experiment tracking ---
         self.goal_count = 0
+        self.episode_count = 0
         self.trials_data = []
         self.last_reset = 0
         self.kill_on_finish = kill_on_finish
@@ -107,6 +108,7 @@ class MainLoop(CognitiveProcess):
     # =========================
 
     def receive_episode_callback(self, msg):
+       self.episode_count+=1
        for file in self.files:
             if file.file_object is None:
                 file.write_header()
@@ -477,7 +479,8 @@ class MainLoop(CognitiveProcess):
         if changed:
             if self.iteration>0:
                 iterations=self.iteration-self.last_reset
-                self.trials_data.append((self.iteration, self.goal_count, iterations, finished))
+                self.trials_data.append((self.iteration, self.goal_count, self.episode_count, finished))
+                self.episode_count=0
                 self.goal_count+=1
                 self.last_reset=self.iteration
             current_world = self.current_world if self.current_world else "None"

@@ -139,7 +139,7 @@ class Deliberation(CognitiveProcess):
         """
         return self.node.predict(input_episodes)
     
-    def select_action(self, predicted_episodes, expected_utilities):
+    def select_action(self, candidate_actions, predicted_episodes, expected_utilities):
         """
         Selects an action probabilistically using softmax over the expected utilities.
         """
@@ -152,13 +152,14 @@ class Deliberation(CognitiveProcess):
             probs = exp_utilities / np.sum(exp_utilities)
             probs = probs.reshape(-1)
             # Sample an index according to the probabilities
-            selected_index = np.random.choice(len(predicted_episodes), p=probs)
-            selected_episode = predicted_episodes[selected_index]
+            selected_index = np.random.choice(len(candidate_actions), p=probs)
         else:
             selected_index = np.argmax(expected_utilities)
-            selected_episode = predicted_episodes[selected_index]
-        self.get_logger().info(f"Selected action: {selected_episode.action} with utility {expected_utilities[selected_index]}")
-        return selected_episode.action
+        selected_action = candidate_actions[selected_index]
+        predicted_state = predicted_episodes[selected_index].perception
+        self.get_logger().info(f"Selected action: {selected_action.action} with utility {expected_utilities[selected_index]}")
+        self.get_logger().info(f"Expected perception: {predicted_state}")
+        return selected_action.action
     
     def publish_episode(self):
         super().publish_episode()
@@ -347,7 +348,7 @@ class Deliberation(CognitiveProcess):
                 # GET EXPECTED UTILITIES
                 predicted_utilities = self.predict_utilities(predicted_episodes)
                 # SELECT ACTION
-                self.current_episode.action = self.select_action(candidate_actions, predicted_utilities)
+                self.current_episode.action = self.select_action(candidate_actions, predicted_episodes, predicted_utilities)
                 # EXECUTE ACTION
                 self.execute_action(self.current_episode.perception, self.current_episode.action)
                 self.current_episode.parent_policy = self.node.name if not self.exploration_process else ""
