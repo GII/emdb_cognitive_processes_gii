@@ -1254,60 +1254,40 @@ class MainLoop(Node):
         while (self.iteration <= self.iterations) and (not self.stop):
 
             if not self.paused:
-                iter_start = self.get_clock().now().nanoseconds
 
                 self.get_logger().info(
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
-                
-                t1 = self.get_clock().now().nanoseconds
                 self.publish_iteration()
-                
-                t2 = self.get_clock().now().nanoseconds
                 self.update_activations()
-                
-                t3 = self.get_clock().now().nanoseconds
                 self.current_world = self.get_current_world_model()
                 self.stm.old_ltm_state=deepcopy(self.LTM_cache)
-                
-                t4 = self.get_clock().now().nanoseconds
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
-                
-                t5 = self.get_clock().now().nanoseconds
                 self.current_policy, self.stm.actuation = self.execute_policy(self.stm.perception, self.current_policy)
                 self.stm.policy = self.current_policy
-                
-                t6 = self.get_clock().now().nanoseconds
                 self.stm.old_perception, self.stm.perception = self.stm.perception, self.read_perceptions()
-                
-                t7 = self.get_clock().now().nanoseconds
                 self.update_activations()
-                
-                t8 = self.get_clock().now().nanoseconds
                 self.stm.ltm_state=deepcopy(self.LTM_cache)
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.stm.old_perception} \n     sensing: {self.stm.perception}"
                 )
 
-                t9 = self.get_clock().now().nanoseconds
+
                 self.active_goals = self.get_goals(self.stm.old_ltm_state)
                 self.stm.reward_list= self.get_goals_reward(self.stm.old_perception, self.stm.perception, self.stm.old_ltm_state)
 
-                t10 = self.get_clock().now().nanoseconds
                 self.publish_episode()
 
-                t11 = self.get_clock().now().nanoseconds
                 self.update_ltm(self.stm)
 
-                t12 = self.get_clock().now().nanoseconds
+
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
                     self.stm.perception = reset_sensing
                     self.stm.ltm_state = self.LTM_cache
 
-                t13 = self.get_clock().now().nanoseconds
                 self.update_policies_to_test(
                     policy=(
                         self.current_policy
@@ -1316,29 +1296,6 @@ class MainLoop(Node):
                     )
                 )
                 self.update_status()
-                
-                t14 = self.get_clock().now().nanoseconds
-
-                # === TIMING BREAKDOWN (every 10 iterations) ===
-                if self.iteration % 10 == 0:
-                    self.get_logger().info(
-                        f"TIMING BREAKDOWN (ms):\n"
-                        f"  1. Publish iteration:    {(t2-t1)/1e6:.1f}\n"
-                        f"  2. Update activations:   {(t3-t2)/1e6:.1f}\n"
-                        f"  3. World model + copy:   {(t4-t3)/1e6:.1f}\n"
-                        f"  4. Select policy:        {(t5-t4)/1e6:.1f}\n"
-                        f"  5. Execute policy:       {(t6-t5)/1e6:.1f}\n"
-                        f"  6. Read perceptions:     {(t7-t6)/1e6:.1f}\n"
-                        f"  7. Update activations:   {(t8-t7)/1e6:.1f}\n"
-                        f"  8. Copy cache:           {(t9-t8)/1e6:.1f}\n"
-                        f"  9. Get goals + rewards:  {(t10-t9)/1e6:.1f}\n"
-                        f"  10. Publish episode:     {(t11-t10)/1e6:.1f}\n"
-                        f"  11. Update LTM:          {(t12-t11)/1e6:.1f}\n"
-                        f"  12. Reset world:         {(t13-t12)/1e6:.1f}\n"
-                        f"  13. Update status:       {(t14-t13)/1e6:.1f}\n"
-                        f"  TOTAL THIS ITER:         {(t14-iter_start)/1e6:.1f}"
-                    )
-                
                 self.iteration += 1
 
         self.close_files()
