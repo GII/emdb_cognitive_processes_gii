@@ -63,7 +63,6 @@ class MainLoop(CognitiveProcess):
         self.softmax_temperature = softmax_temperature
 
         # --- Node/goal/drive management ---
-        self.current_world = None
         self.n_cnodes = 0
         self.n_goals = 0
 

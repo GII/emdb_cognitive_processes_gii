@@ -178,6 +178,20 @@ class Deliberation(CognitiveProcess):
         linked_goals = [neighbor["name"] for neighbor in cnodes_neighbors if neighbor["node_type"] == "Goal"]
         self.get_logger().info(f"Linked goals: {linked_goals}")
         return linked_goals
+    
+    def get_linked_world_model(self):
+        """
+        Retrieves the goal linked to the parent node of the process
+        """
+        cnodes = [neighbor["name"] for neighbor in self.node.neighbors if neighbor["node_type"] == "CNode"]
+        self.get_logger().info(f"Linked CNodes: {cnodes}")
+        cnodes_neighbors = []
+        for cnode in cnodes:
+            cnodes_neighbors.extend(self.LTM_cache["CNode"][cnode]["neighbors"])
+        self.get_logger().info(f"Linked CNodes neighbors: {cnodes_neighbors}")
+        linked_goals = [neighbor["name"] for neighbor in cnodes_neighbors if neighbor["node_type"] == "WorldModel"]
+        self.get_logger().info(f"Linked world models: {linked_goals}")
+        return linked_goals
 
     def check_completion(self):
         self.get_logger().info("Checking if goals are completed")
@@ -271,6 +285,7 @@ class Deliberation(CognitiveProcess):
             # This assumes that when this method is executed, a trace has been created in the episodic buffer, either because a reward was obtained or because the max iterations were reached.
             # if world_model_activation > threshold and goal_activation > threshold:
             reward = reward_list.get(goal, 0.0)
+            self.get_logger().info(f"Evaluating CNode: {cnode} | Goal: {goal} | Reward: {reward} | PNode Activation: {pnode_activation}")
             if (reward > threshold):
                 reward_list.pop(goal)
                 if not point_added:
@@ -304,7 +319,7 @@ class Deliberation(CognitiveProcess):
         return added
 
     def add_pnode_antitrace(self, pnode, antitrace):
-        confidences = list(np.zeros(len(antitrace)))
+        confidences = list(-np.ones(len(antitrace)))
         added = self.add_pnode_points(pnode, antitrace, confidences)
         return added
 
@@ -328,9 +343,9 @@ class Deliberation(CognitiveProcess):
         self.active_goals = self.get_goals(self.LTM_cache)
         self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
-        finished = False
+        achieved = False
 
-        while (self.iteration <= self.iterations) and (not self.stop) and not finished:
+        while (self.iteration <= self.iterations) and (not self.stop) and not achieved:
 
             if not self.paused:
 
@@ -360,10 +375,13 @@ class Deliberation(CognitiveProcess):
                 )
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
                 self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
-                finished = self.check_completion()
+                achieved = self.check_completion()
                 self.publish_episode()
                 self.iteration += 1
-        self.update_ltm(self.current_episode)
+        if not achieved and hasattr(self.node.episodic_buffer, "add_antitrace"):
+            self.node.episodic_buffer.add_antitrace()
+        if not self.exploration_process:
+            self.update_ltm(self.current_episode)
         self.finished_flag.set()
         self.start_flag.clear()
     

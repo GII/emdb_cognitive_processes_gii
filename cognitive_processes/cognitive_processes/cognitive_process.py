@@ -43,8 +43,10 @@ class CognitiveProcess(Node):
             {}
         )  # Nested dics, like {'CNode': {'CNode1': {'activation': 0.0}}, ...}
         self.default_class = {}
+        self.default_params = {}
 
         # --- Node/goal/drive management ---
+        self.current_world = None
         self.active_goals = []
         self.unlinked_drives = []
 
@@ -111,6 +113,7 @@ class CognitiveProcess(Node):
         if hasattr(self, "Connectors"):
             for connector in self.Connectors:
                 self.default_class[connector["data"]] = connector.get("default_class")
+                self.default_params[connector["data"]] = connector.get("parameters", {})
 
 
     def setup_control_channel(self):
@@ -333,7 +336,9 @@ class CognitiveProcess(Node):
         for (
             sensor
         ) in self.perception_cache.keys():  # TODO: Consider perception activation when reading
-            self.perception_cache[sensor]["flag"].wait()
+            if not self.perception_cache[sensor]["flag"].wait(timeout=5.0):
+                self.get_logger().warning(f"Timeout waiting for perception of sensor {sensor}")
+                self.perception_cache[sensor]["flag"].wait()
             sensing[sensor] = copy(self.perception_cache[sensor]["data"])
             self.perception_cache[sensor]["flag"].clear()
             self.get_logger().debug("Processing perception: " + str(sensor))
@@ -412,7 +417,9 @@ class CognitiveProcess(Node):
 
         for node in self.activation_inputs:
             self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
-            self.activation_inputs[node]['flag'].wait()
+            if not self.activation_inputs[node]['flag'].wait(timeout=5.0):
+                self.get_logger().warning(f"Timeout waiting for activation of node {node}")
+                self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
         self.semaphore.release()
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
@@ -579,13 +586,16 @@ class CognitiveProcess(Node):
         world_model = self.get_current_world_model()
         ident = f"{world_model}__{goal}__{policy}"
 
-        space_class = self.default_class.get("Space")
+        space_class = self.default_class.get("Space") # NOTE: Space class is now passed through the P-Node's parameters in the yaml file
+        space_params = self.default_params.get("Space", {}) #TODO: Pass any parameters from yaml file if needed
         pnode_class = self.default_class.get("PNode")
+        pnode_params = self.default_params.get("PNode", {})
         cnode_class = self.default_class.get("CNode")
+        cnode_params = self.default_params.get("CNode", {})
 
         pnode_name = f"pnode_{ident}"
         pnode = self.create_node_client(
-            name=pnode_name, class_name=pnode_class, parameters={"space_class": space_class}
+            name=pnode_name, class_name=pnode_class, parameters={**pnode_params}
         )
 
         if not pnode:
@@ -599,7 +609,7 @@ class CognitiveProcess(Node):
 
         cnode_name = f"cnode_{ident}"
         cnode = self.create_node_client(
-            name=cnode_name, class_name=cnode_class, parameters=neighbors
+            name=cnode_name, class_name=cnode_class, parameters={**cnode_params, **neighbors}
         )
         #Add new C-Node as neighbor of the corresponding policy
         policy_success=self.add_neighbor(policy, cnode_name) 
