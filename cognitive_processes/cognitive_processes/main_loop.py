@@ -23,7 +23,7 @@ from cognitive_node_interfaces.srv import (
     IsSatisfied
 )
 from cognitive_processes.cognitive_process import CognitiveProcess
-from cognitive_nodes.episode import reward_dict_to_msg
+from cognitive_nodes.episode import episode_msg_to_obj
 from core_interfaces.srv import CreateNode, SetChangesTopic, UpdateNeighbor, StopExecution
 from cognitive_node_interfaces.msg import Activation
 from cognitive_processes_interfaces.msg import ControlMsg
@@ -135,17 +135,10 @@ class MainLoop(CognitiveProcess):
         :param file_item: Dictionary with the file information.
         :type file_item: dict
         """
-        if "data" in file_item:
-            new_file = class_from_classname(file_item["class"])(
-                ident=file_item["id"],
-                file_name=file_item["file"],
-                data=file_item["data"],
-                node=self,
-            )
-        else:
-            new_file = class_from_classname(file_item["class"])(
-                ident=file_item["id"], file_name=file_item["file"], node=self
-            )
+        params = file_item.get("parameters", {})
+        new_file = class_from_classname(file_item["class"])(
+            ident=file_item["id"], file_name=file_item["file"], node=self, **params
+        )
         self.files.append(new_file)
 
     def update_status(self):
@@ -537,7 +530,7 @@ class MainLoop(CognitiveProcess):
                 self.update_activations()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
-                self.current_policy, self.current_episode.action.actuation = self.execute_policy(self.current_episode.perception, self.current_policy)
+                self.current_policy, _ = self.execute_policy(self.current_episode.perception, self.current_policy)
                 self.current_episode.parent_policy = self.current_policy
                 self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
                 self.update_activations()
@@ -639,9 +632,9 @@ class MainLoopLight(MainLoop):
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        action= actuation_msg_to_dict(policy_response.action)
+        episode = episode_msg_to_obj(policy_response.episode)
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
-        return policy_response.policy, action 
+        return policy_response.policy, episode 
 
     def run(self):
         """
@@ -667,24 +660,20 @@ class MainLoopLight(MainLoop):
                 self.update_activations()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
-                self.current_policy, self.current_episode.action.actuation = self.execute_policy(self.current_episode.perception, self.current_policy)
+                self.current_policy, resulting_episode = self.execute_policy(self.current_episode.perception, self.current_policy)
                 self.current_episode.parent_policy = self.current_policy
-                self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
+                self.current_episode.old_perception = self.current_episode.perception
+                if resulting_episode.perception:
+                    self.current_episode.perception = resulting_episode.perception
+                else:
+                    self.current_episode.perception = self.read_perceptions()
+                self.current_episode.reward_list = resulting_episode.reward_list
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.current_episode.old_perception} \n     sensing: {self.current_episode.perception}"
                 )
-
-
-                #self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
-                #self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
-
-                #self.publish_episode()
-
-                #self.update_ltm(self.current_episode)
-
 
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()

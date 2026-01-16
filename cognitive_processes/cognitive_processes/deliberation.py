@@ -24,6 +24,8 @@ class Deliberation(CognitiveProcess):
         self.node = node
         self.candidate_actions = candidate_actions
         self.exploration_process = exploration_process
+        self.summary_episode = Episode()
+        self.summary_episode.parent_policy = self.node.name
 
         self.start_flag = threading.Event()
         self.finished_flag = threading.Event()
@@ -339,7 +341,9 @@ class Deliberation(CognitiveProcess):
         self.get_logger().info("Deliberation process started")
         self.current_world = self.get_current_world_model()
         self.current_episode.perception = self.read_perceptions()
+        self.summary_episode.old_perception = self.current_episode.perception
         self.update_activations()
+        self.summary_episode.old_ltm_state = deepcopy(self.LTM_cache)
         self.active_goals = self.get_goals(self.LTM_cache)
         self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
@@ -373,15 +377,18 @@ class Deliberation(CognitiveProcess):
                 self.get_logger().info(
                     f"DEBUG PERCEPTION: \n old_sensing: {self.current_episode.old_perception} \n     sensing: {self.current_episode.perception}"
                 )
+                
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
                 self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
                 achieved = self.check_completion()
                 self.publish_episode()
                 self.iteration += 1
+        self.summary_episode.perception = self.current_episode.perception
+        self.summary_episode.reward_list = self.current_episode.reward_list
         if not achieved and hasattr(self.node.episodic_buffer, "add_antitrace"):
             self.node.episodic_buffer.add_antitrace()
         if not self.exploration_process:
-            self.update_ltm(self.current_episode)
+            self.update_ltm(self.summary_episode)
         self.finished_flag.set()
         self.start_flag.clear()
     
@@ -389,7 +396,6 @@ class Deliberation(CognitiveProcess):
     def run(self):
         self.current_episode.perception = self.read_perceptions()
         self.node.episodic_buffer.configure_labels(self.current_episode)
-        
         while True:
             try:
                 self.deliberation_cycle()
