@@ -60,6 +60,7 @@ class CognitiveProcess(Node):
         self.activation_inputs = {}
         self.activation_time = 0
         self.activation_threshold = 0.01
+        self.activation_logs = False
 
         # --- Callback groups and service clients ---
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
@@ -419,8 +420,10 @@ class CognitiveProcess(Node):
             self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
             if not self.activation_inputs[node]['flag'].wait(timeout=5.0):
                 self.get_logger().warning(f"Timeout waiting for activation of node {node}")
+                self.activation_logs = True
                 self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
+        self.activation_logs = False
         self.semaphore.release()
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
@@ -471,7 +474,6 @@ class CognitiveProcess(Node):
             self.destroy_subscription(self.activation_inputs[name])
             self.activation_inputs.pop(name)
 
-
     def read_activation_callback(self, msg: Activation):
         """
         This method receives a message from an activation topic, processes the
@@ -487,27 +489,9 @@ class CognitiveProcess(Node):
         old_timestamp=self.LTM_cache[node_type][node_name]['activation_timestamp']
         self.LTM_cache[node_type][node_name]['activation']=activation
         self.LTM_cache[node_type][node_name]['activation_timestamp']=timestamp
-        
-        if timestamp > self.activation_time :            
-            self.activation_inputs[node_name]['flag'].set()
-        elif timestamp < old_timestamp:
-            self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
 
-    def read_activation_callback(self, msg: Activation):
-        """
-        This method receives a message from an activation topic, processes the
-        message and updates the activation in the LTM cache.
-
-        :param msg: Message that contains the activation information.
-        :type msg: cognitive_node_interfaces.msg.Activation
-        """
-        node_name=msg.node_name
-        node_type=msg.node_type
-        activation=msg.activation
-        timestamp=Time.from_msg(msg.timestamp).nanoseconds
-        old_timestamp=self.LTM_cache[node_type][node_name]['activation_timestamp']
-        self.LTM_cache[node_type][node_name]['activation']=activation
-        self.LTM_cache[node_type][node_name]['activation_timestamp']=timestamp
+        if self.activation_logs:
+            self.get_logger().debug(f'Activation received: {node_type} {node_name} - Activation: {activation} - Timestamp: {timestamp} / Activation Time: {self.activation_time}')
         
         if timestamp > self.activation_time :            
             self.activation_inputs[node_name]['flag'].set()
