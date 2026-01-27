@@ -267,9 +267,9 @@ class CognitiveProcess(Node):
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception_dict_to_msg(perception)
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        action= policy_response.action
+        episode = policy_response.episode
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
-        return policy_response.policy, action 
+        return policy_response.policy, episode 
     
     def execute_actuation(self, actuation:dict):
         """
