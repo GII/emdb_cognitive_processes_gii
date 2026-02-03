@@ -96,6 +96,8 @@ class MainLoop(Node):
         self.sensorial_changes_val = False
         self.softmax_selection = False
         self.softmax_temperature = 1
+        
+        self.get_logger().info(f"POLICY SELECTION CONFIG - softmax: {self.softmax_selection}, temperature: {self.softmax_temperature}, threshold: {self.activation_threshold}")
         self.pnodes_success = {}
         self.goal_count=0
         self.trials_data=[]
@@ -388,33 +390,51 @@ class MainLoop(Node):
 
         policy_activations={}
         all_policy_activations={}
+        
+        self.get_logger().info(f"SELECT_POLICY - Starting selection. Activation threshold: {self.activation_threshold}")
+        self.get_logger().info(f"SELECT_POLICY - Policies to test: {policies_filtered}")
+        
         for policy in policies_filtered:
             act=self.LTM_cache["Policy"][policy]["activation"]
+            self.get_logger().info(f"SELECT_POLICY - Policy {policy}: activation={act:.4f}, threshold={self.activation_threshold}, passes={'YES' if act > self.activation_threshold else 'NO'}")
             if act>self.activation_threshold: #Filters out non-activated policies
                 policy_activations[policy]=act
 
         for policy in policies:
             all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
+        
+        self.get_logger().info(f"SELECT_POLICY - All policy activations: {all_policy_activations}")
+        self.get_logger().info(f"SELECT_POLICY - Filtered policy activations (above threshold): {policy_activations}")
         self.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
         self.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
+        
         if not policy_activations:
             policy_pool = all_policy_activations
+            self.get_logger().info("SELECT_POLICY - No policies above threshold, using all policies")
         else:
             policy_pool = policy_activations
+            self.get_logger().info(f"SELECT_POLICY - Using {len(policy_pool)} policies above threshold")
 
         if softmax:
             selected = self.select_policy_softmax(policy_pool, self.softmax_temperature)
+            self.get_logger().info(f"SELECT_POLICY - Softmax selected: {selected}")
         else: 
             selected= self.select_max_policy(policy_pool)
+            self.get_logger().info(f"SELECT_POLICY - Max selected: {selected}")
 
 
         self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
         self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
-        if not policy_pool[selected]:
+        selected_activation = policy_pool.get(selected, None)
+        self.get_logger().info(f"SELECT_POLICY - Selected policy: {selected}, activation: {selected_activation}")
+        
+        if not selected_activation or selected_activation <= 0:
+            self.get_logger().warning(f"SELECT_POLICY - Selected policy has zero/invalid activation, selecting random policy")
             selected = self.random_policy()
+            self.get_logger().info(f"SELECT_POLICY - Random policy selected: {selected}")
 
-        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        self.get_logger().info(f"Selected policy => {selected} ({policy_pool.get(selected, 'N/A')})")
 
         return selected
     
@@ -451,8 +471,17 @@ class MainLoop(Node):
         probabilities = exp_activations / numpy.sum(exp_activations)
         policy_probabilities = {policy: prob for policy, prob in zip(policy_names, probabilities)}
 
+        # Log detailed softmax info
+        max_policy = max(policy_activations.items(), key=lambda x: x[1])
+        self.get_logger().info(f"SOFTMAX - Temperature: {temperature}, Max activation policy: {max_policy[0]} ({max_policy[1]:.4f})")
+        
+        # Sort and show top 3 probabilities
+        sorted_probs = sorted(policy_probabilities.items(), key=lambda x: x[1], reverse=True)[:3]
+        self.get_logger().info(f"SOFTMAX - Top 3 probabilities: {[(p, f'{prob:.2%}') for p, prob in sorted_probs]}")
+
         # Select a policy based on the probabilities
         selected = self.rng.choice(policy_names, p=probabilities)
+        self.get_logger().info(f"SOFTMAX - Selected: {selected} (probability: {policy_probabilities[selected]:.2%})")
         self.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
         return selected
 
@@ -486,9 +515,16 @@ class MainLoop(Node):
 
         if policy:
             if policy in self.policies_to_test:
+                self.get_logger().warning(f"UPDATE_POLICIES_TO_TEST - Removing policy: {policy} (no sensorial change detected)")
+                self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - Before removal: {len(self.policies_to_test)} policies: {self.policies_to_test}")
                 self.policies_to_test.remove(policy)
+                self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - After removal: {len(self.policies_to_test)} policies: {self.policies_to_test}")
+            else:
+                self.get_logger().debug(f"UPDATE_POLICIES_TO_TEST - Policy {policy} not in list")
         else:
+            self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - Resetting policies_to_test (sensorial change detected or initialization)")
             self.policies_to_test = list(self.LTM_cache["Policy"].keys())
+            self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - Reset complete: {len(self.policies_to_test)} policies: {self.policies_to_test}")
 
     def sensorial_changes(self, sensing, old_sensing):
         """
@@ -507,16 +543,16 @@ class MainLoop(Node):
                 if isinstance(perception, dict):
                     for attribute in perception:
                         difference = abs(perception[attribute] - perception_old[attribute])
-                        if difference > 0.01:
-                            self.get_logger().debug("Sensorial change detected")
+                        if difference > 0.001:  # En vez de 0.01
+                            self.get_logger().info(f"SENSORIAL_CHANGE - Detected in {sensor}.{attribute}: {perception_old[attribute]:.4f} → {perception[attribute]:.4f} (diff={difference:.4f})")
                             self.sensorial_changes_val = True
                             return True
                 else:
                     if abs(perception[0] - perception_old[0]) > 0.01:
-                        self.get_logger().debug("Sensorial change detected")
+                        self.get_logger().info(f"SENSORIAL_CHANGE - Detected in {sensor}: {perception_old[0]:.4f} → {perception[0]:.4f}")
                         self.sensorial_changes_val = True
                         return True
-        self.get_logger().debug("No sensorial change detected")
+        self.get_logger().info(f"SENSORIAL_CHANGE - No change detected (threshold=0.01). Policy will be removed from test pool.")
         self.sensorial_changes_val = False
         return False
 
@@ -532,12 +568,11 @@ class MainLoop(Node):
             self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
-            self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
+            self.get_logger().info(f"DEBUG: Waiting for activation: {node}")
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
         self.semaphore.release()
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
-
     def request_activation(self, name, sensing):
         """
         This method calls the service to get the activation of a node.
@@ -598,8 +633,13 @@ class MainLoop(Node):
         activation=msg.activation
         timestamp=Time.from_msg(msg.timestamp).nanoseconds
         old_timestamp=self.LTM_cache[node_type][node_name]['activation_timestamp']
+        old_activation=self.LTM_cache[node_type][node_name]['activation']
         self.LTM_cache[node_type][node_name]['activation']=activation
         self.LTM_cache[node_type][node_name]['activation_timestamp']=timestamp
+        
+        # Log activation updates for policies
+        if node_type == "Policy":
+            self.get_logger().debug(f"ACTIVATION UPDATE - Policy: {node_name}, Old: {old_activation:.4f}, New: {activation:.4f}, Timestamp: {timestamp}")
         
         if timestamp > self.activation_time :            
             self.activation_inputs[node_name]['flag'].set()
@@ -1214,6 +1254,9 @@ class MainLoop(Node):
             if file.file_object is None:
                 file.write_header()
             file.write()
+            # Ensure data hits disk during long runs instead of only on close
+            if file.file_object:
+                file.file_object.flush()
 
     def close_files(self):
         """
