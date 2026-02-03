@@ -205,7 +205,8 @@ class Deliberation(CognitiveProcess):
         self.get_logger().info(f"Current rewards: {self.current_episode.reward_list}")
         rewards = [self.current_episode.reward_list[goal] for goal in linked_goals if goal in self.current_episode.reward_list]
         self.current_reward = max(rewards) if rewards else 0.0
-        return any([reward > self.reward_threshold for reward in rewards])
+        reward_obtained = any([reward > self.reward_threshold for reward in rewards])
+        return reward_obtained
     
     # =========================
     # LTM & STM UPDATES

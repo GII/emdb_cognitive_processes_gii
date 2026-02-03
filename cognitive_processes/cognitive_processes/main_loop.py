@@ -422,12 +422,13 @@ class MainLoop(CognitiveProcess):
         if not updates:
             self.get_logger().info("No update required in PNode/CNodes")
 
-    def add_point(self, name, sensing):
-        response = super().add_point(name, sensing)
-        self.pnodes_success[name] = True
+    def add_point(self, name, sensing, node_type="pnode"):
+        response = super().add_point(name, sensing, node_type=node_type)
+        if node_type == "pnode":
+            self.pnodes_success[name] = True
         return response
     
-    def add_antipoint(self, name, sensing):
+    def add_antipoint(self, name, sensing, node_type="pnode"):
         """
         Adds an antipoint to the specified PNode.
 
@@ -436,8 +437,9 @@ class MainLoop(CognitiveProcess):
         :param sensing: Sensing data to be used for the antipoint.
         :type sensing: dict
         """
-        response = super().add_antipoint(name, sensing)
-        self.pnodes_success[name] = False
+        response = super().add_antipoint(name, sensing, node_type=node_type)
+        if node_type == "pnode":
+            self.pnodes_success[name] = False
         return response
 
     # =========================

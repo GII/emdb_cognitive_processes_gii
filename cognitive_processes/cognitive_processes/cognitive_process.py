@@ -508,7 +508,7 @@ class CognitiveProcess(Node):
         """
         raise NotImplementedError("This method should be implemented in the derived class.")
     
-    def add_point(self, name, sensing):
+    def add_point(self, name, sensing, node_type="pnode"):
         """
         Sends the request to add a point to a P-Node.
 
@@ -520,17 +520,17 @@ class CognitiveProcess(Node):
         :rtype: bool
         """
 
-        service_name = "pnode/" + str(name) + "/add_point"
+        service_name = f"{node_type}/" + str(name) + "/add_point"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(AddPoint, service_name)
 
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point=perception, confidence=1.0)
-        self.get_logger().info(f"Added point in pnode {name}")
+        self.get_logger().info(f"Added point in {node_type} {name}")
         self.get_logger().debug(f"POINT: {str(sensing)}")
         return response.added
 
-    def add_antipoint(self, name, sensing):
+    def add_antipoint(self, name, sensing, node_type="pnode"):
         """
         Sends the request to add an antipoint to a P-Node.
 
@@ -542,7 +542,7 @@ class CognitiveProcess(Node):
         :rtype: bool
         """
 
-        service_name = "pnode/" + str(name) + "/add_point"
+        service_name = f"{node_type}/" + str(name) + "/add_point"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(
                 AddPoint, service_name
@@ -550,7 +550,7 @@ class CognitiveProcess(Node):
 
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point=perception, confidence=-1.0)
-        self.get_logger().info(f"Added anti-point in pnode {name}")
+        self.get_logger().info(f"Added anti-point in {node_type} {name}")
         self.get_logger().debug(f"ANTI-POINT: {str(sensing)}")
         return response.added
 
@@ -626,11 +626,11 @@ class CognitiveProcess(Node):
             "history_size": 300, #TODO Pass this as parameter from yaml file
             "min_confidence": 0.94, #TODO Pass this as parameter from yaml file
             "ltm_id": self.LTM_id,
-            "perception": perception
         }
         goal = self.create_node_client(
             name=goal_name, class_name=goal_class, parameters=parameters
         )
+        self.add_point(goal_name, perception, node_type="goal")
         self.n_goals+=1
         if not goal:
             self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
