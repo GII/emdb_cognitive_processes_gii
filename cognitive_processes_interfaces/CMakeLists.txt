@@ -12,13 +12,12 @@ find_package(builtin_interfaces REQUIRED)
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-find_package(cognitive_node_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ControlMsg.msg"
-  "msg/Episode.msg"
+  "msg/RewardList.msg"
   "srv/WorldReset.srv"
-  DEPENDENCIES builtin_interfaces cognitive_node_interfaces
+  DEPENDENCIES builtin_interfaces
 )
 
 
