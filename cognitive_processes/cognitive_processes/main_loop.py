@@ -568,7 +568,7 @@ class MainLoop(Node):
             self.activation_inputs[node]['flag'].clear()
 
         for node in self.activation_inputs:
-            self.get_logger().info(f"DEBUG: Waiting for activation: {node}")
+            self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
             self.activation_inputs[node]['flag'].wait()
             self.activation_inputs[node]['flag'].clear()
         self.semaphore.release()
