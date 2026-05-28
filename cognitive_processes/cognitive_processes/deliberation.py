@@ -2,14 +2,13 @@ import numpy as np
 import threading
 import traceback
 from copy import deepcopy, copy
-
-from cognitive_nodes.episode import Episode, Action, episode_obj_list_to_msg_list, episode_msg_list_to_obj_list
 from scipy.stats.qmc import LatinHypercube
+
+from cognitive_nodes.episode import Episode, episode_obj_to_msg, container_msg_to_episode
+from core.container import Container
 from cognitive_processes.cognitive_process import CognitiveProcess
 from core.service_client import ServiceClient
-
 from cognitive_node_interfaces.srv import AddPoints, Predict
-from core.utils import perception_dict_to_msg
 
 
 class Deliberation(CognitiveProcess):
@@ -22,7 +21,8 @@ class Deliberation(CognitiveProcess):
         """
         super().__init__(name, iterations, trials, LTM_id, **params)
         self.node = node
-        self.candidate_actions = candidate_actions
+        self.candidate_actions_num = candidate_actions
+        self.candidate_actions = None
         self.exploration_process = exploration_process
         self.summary_episode = Episode()
         self.summary_episode.parent_policy = self.node.name
@@ -54,12 +54,12 @@ class Deliberation(CognitiveProcess):
                 "Actuation configuration not found in globals. Please ensure it is set correctly on the YAML file."
             )
         else:
-            self.actuation_dict = {}
+            self.actuation_labels = [] 
             for actuator in self.actuation_config:
-                self.actuation_dict[actuator] = [{}]
-                for param in self.actuation_config[actuator]:
-                    self.actuation_dict[actuator][0][param] = 0.0
-                self.actuation_dims += len(self.actuation_config[actuator])
+                self.actuation_labels.extend([f"{actuator}:{param}" for param in self.actuation_config[actuator]])
+            self.action_container = Container("action", max_size=1, container_type="action", labels=self.actuation_labels)
+            self.actuation_dims = len(self.action_container.feature_labels)
+
             self.get_logger().info(
                 f"Actuation configuration {self.actuation_config} loaded with {self.actuation_dims} dimensions."
             )
@@ -78,41 +78,44 @@ class Deliberation(CognitiveProcess):
 
             for node in self.activation_inputs:
                 if node == self.node.name:
-                    self.activation_inputs[node]['flag'].set()
+                    self.activation_inputs[node]['flag'].set() # Filter the activation of the parent node to avoid deadlocks
                 self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
-                self.activation_inputs[node]['flag'].wait()
+                if not self.activation_inputs[node]['flag'].wait(timeout=5.0):
+                    self.get_logger().warning(f"Timeout waiting for activation of node {node}")
+                    self.activation_logs = True
+                    self.activation_inputs[node]['flag'].wait()
                 self.activation_inputs[node]['flag'].clear()
             self.semaphore.release()
             self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
-    def generate_candidate_actions(self, old_perception=None, algorithm = "latin"):
+    def generate_candidate_actions(self, old_perception: Container = None, algorithm = "latin") -> Episode:
         """
         Generates a list of candidate Episode objects based on the configured actuation dimensions.
         Each Episode will have its old_perception set to the argument and action.actuation set to the candidate action.
         """
         if algorithm == "latin":
-            candidate_matrix = self.action_sampler.random(n=self.candidate_actions)
+            candidate_matrix = self.action_sampler.random(n=self.candidate_actions_num)
         elif algorithm == "random":
-            candidate_matrix = self.rng.random((self.candidate_actions, self.actuation_dims))
+            candidate_matrix = self.rng.random((self.candidate_actions_num, self.actuation_dims))
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
-        action_list = [deepcopy(self.actuation_dict) for _ in range(self.candidate_actions)]
-        for i, action in enumerate(action_list):
-            offset = 0
-            for actuator, params in action.items():
-                for j, param in enumerate(params[0]):
-                    params[0][param] = candidate_matrix[i][j + offset]
-                offset += len(params[0])
-        # Create Episode objects for each candidate action
-        episodes = []
-        for i in range(self.candidate_actions):
-            action = Action(actuation=action_list[i])
-            episode = Episode(old_perception=old_perception, action=action)
-            episodes.append(episode)
-        self.get_logger().info(f"Generated {len(episodes)} candidate episodes")
-        return episodes
+        
+        # Assign the candidate actions to the action container and create an episode for the candidates
+        timestamp = self.get_clock().now().nanoseconds / 1e9
+        timestamps = np.full((self.candidate_actions_num,), timestamp)
+        self.action_container.push(candidate_matrix, timestamps)
+        candidates_episode = Episode()
+        candidates_episode.action = self.action_container
+
+        # Tile the old perception for each candidate action
+        old_perception_tile = Container("old_perception", max_size=self.candidate_actions_num, container_type="perception", labels=old_perception.feature_labels)
+        fill_data = np.full((self.candidate_actions_num, len(old_perception.feature_labels)), old_perception.read().values[0, :])
+        old_perception_tile.push(fill_data, timestamps)
+        candidates_episode.old_perception = old_perception_tile
+        self.get_logger().info(f"Generated {self.candidate_actions_num} candidate episodes")
+        return candidates_episode
     
-    def predict_perceptions(self, world_model, input_episodes: list[Episode]) -> list[Episode]:
+    def predict_perceptions(self, world_model, input_episodes: Episode) -> Episode:
         """
         Predicts the expected utilities for the given input episodes using the Utility Model.
         
@@ -127,10 +130,10 @@ class Deliberation(CognitiveProcess):
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(Predict, service_name)
         # Use the World Model's predict method to get the predicted states
-        predicted_episodes = self.node_clients[service_name].send_request(input_episodes=episode_obj_list_to_msg_list(input_episodes))
-        return episode_msg_list_to_obj_list(predicted_episodes.output_episodes)
+        predicted_episodes = self.node_clients[service_name].send_request(input_episodes=episode_obj_to_msg(input_episodes))
+        return container_msg_to_episode(predicted_episodes.output_episodes)
     
-    def predict_utilities(self, input_episodes: list[Episode]) -> list[float]:
+    def predict_utilities(self, input_episodes: Episode) -> list[float]:
         """
         Predicts the expected utilities for the given input episodes using the Utility Model.
         
@@ -141,7 +144,7 @@ class Deliberation(CognitiveProcess):
         """
         return self.node.predict(input_episodes)
     
-    def select_action(self, candidate_actions, predicted_episodes, expected_utilities):
+    def select_action(self, candidate_actions: Container, predicted_perceptions: Container, expected_utilities):
         """
         Selects an action probabilistically using softmax over the expected utilities.
         """
@@ -157,11 +160,12 @@ class Deliberation(CognitiveProcess):
             selected_index = np.random.choice(len(candidate_actions), p=probs)
         else:
             selected_index = np.argmax(expected_utilities)
-        selected_action = candidate_actions[selected_index]
-        predicted_state = predicted_episodes[selected_index].perception
-        self.get_logger().info(f"Selected action: {selected_action.action} with utility {expected_utilities[selected_index]}")
+        selected_action = candidate_actions.read(selected_index).values
+        predicted_state = predicted_perceptions.read(selected_index)
+        self.action_container.push(selected_action, timestamp=self.get_clock().now().nanoseconds / 1e9)
+        self.get_logger().info(f"Selected action: {selected_action} with utility {expected_utilities[selected_index]}")
         self.get_logger().info(f"Expected perception: {predicted_state}")
-        return selected_action.action
+        return self.action_container
     
     def publish_episode(self):
         super().publish_episode()
@@ -219,10 +223,10 @@ class Deliberation(CognitiveProcess):
         :type stm: cognitive_processes.main_loop.Episode
         """
         if not self.exploration_process:
-            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.parent_policy, copy(stm.reward_list), stm.old_ltm_state)
+            self.update_pnodes_reward_basis(copy(stm.reward_list), stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
+    def update_pnodes_reward_basis(self, reward_list, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -238,12 +242,6 @@ class Deliberation(CognitiveProcess):
         -If there are no CNodes connected to the policy a new CNode is created
         if there is reward.
 
-        :param old_perception: Perception before the execution of the policy.
-        :type old_perception: dict
-        :param perception: Perception after the execution of the policy.
-        :type perception: dict
-        :param policy: Policy executed.
-        :type policy: str
         :param reward_list: Dictionary with the rewards obtained for each goal after the execution of the policy.
         :type reward_list: dict
         :param ltm_cache: LTM cache containing the nodes and their data.
@@ -292,12 +290,12 @@ class Deliberation(CognitiveProcess):
             if (reward > threshold):
                 reward_list.pop(goal)
                 if not point_added:
-                    trace = self.node.episodic_buffer.traces_buffer[-1]
+                    trace = Container.from_dataarray(self.node.episodic_buffer.traces_buffer.read_flattened(-1), container_type="trace")
                     self.add_pnode_trace(pnode, trace)
                     updates = True
                     point_added = True
             elif pnode_activation > threshold and len(self.node.episodic_buffer.antitraces_buffer) > 0:
-                antitrace = self.node.episodic_buffer.antitraces_buffer[-1]
+                antitrace = Container.from_dataarray(self.node.episodic_buffer.antitraces_buffer.read_flattened(-1), container_type="antitrace")
                 self.add_pnode_antitrace(pnode, antitrace)
                 updates = True
 
@@ -316,24 +314,24 @@ class Deliberation(CognitiveProcess):
         if not updates:
             self.get_logger().info("No update required in PNode/CNodes")
 
-    def add_pnode_trace(self, pnode, trace):
-        confidences = list(np.ones(len(trace)))
+    def add_pnode_trace(self, pnode: str, trace: Container, confidence: float = 1.0):
+        confidences = np.full(len(trace), confidence)
         added = self.add_pnode_points(pnode, trace, confidences)
         return added
 
-    def add_pnode_antitrace(self, pnode, antitrace):
-        confidences = list(-np.ones(len(antitrace)))
+    def add_pnode_antitrace(self, pnode: str, antitrace: Container, confidence: float = 1.0):
+        confidences = np.full(len(antitrace), -confidence)
         added = self.add_pnode_points(pnode, antitrace, confidences)
         return added
 
-    def add_pnode_points(self, pnode, trace, confidences):
+    def add_pnode_points(self, pnode: str, trace: Container, confidences: np.ndarray):
         service_name = "pnode/" + str(pnode) + "/add_points"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(
                 AddPoints, service_name
             )
-        points = [perception_dict_to_msg(episode.old_perception) for episode, _ in trace]
-        response = self.node_clients[service_name].send_request(points=points, confidences=confidences)
+        points = trace.to_msg()
+        response = self.node_clients[service_name].send_request(points=points, confidences=confidences.tolist())
         return response.added
 
     def deliberation_cycle(self):
@@ -360,15 +358,15 @@ class Deliberation(CognitiveProcess):
                 self.update_activations()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 # GENERATE POSSIBLE ACTIONS
-                candidate_actions = self.generate_candidate_actions(self.current_episode.perception, self.candidate_generation)
+                candidates = self.generate_candidate_actions(self.current_episode.perception, self.candidate_generation)
                 # PREDICT EXPECTED PERCEPTIONS
                 predicted_episodes = self.predict_perceptions(
-                    self.current_world, candidate_actions
+                    self.current_world, candidates
                 )
                 # GET EXPECTED UTILITIES
                 predicted_utilities = self.predict_utilities(predicted_episodes)
                 # SELECT ACTION
-                self.current_episode.action = self.select_action(candidate_actions, predicted_episodes, predicted_utilities)
+                self.current_episode.action = self.select_action(candidates.action, predicted_episodes, predicted_utilities)
                 # EXECUTE ACTION
                 self.execute_action(self.current_episode.perception, self.current_episode.action)
                 self.current_episode.parent_policy = self.node.name if not self.exploration_process else ""
@@ -380,7 +378,8 @@ class Deliberation(CognitiveProcess):
                 )
                 
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
-                self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                self.current_episode.update_reward(reward_list, timestamp=self.get_clock().now().nanoseconds / 1e9)
                 achieved = self.check_completion()
                 self.publish_episode()
                 self.iteration += 1

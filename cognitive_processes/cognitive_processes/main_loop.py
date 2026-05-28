@@ -9,28 +9,22 @@ import numpy
 import time
 from copy import copy, deepcopy
 
-from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 
 from core.service_client import ServiceClient
+from core.container import Container
 from cognitive_nodes.episode import Episode
-from cognitive_node_interfaces.srv import (
-    Execute,
-    GetActivation,
-    GetReward,
-    GetInformation,
-    AddPoint,
-    IsSatisfied
-)
+from cognitive_node_interfaces.srv import Execute
 from cognitive_processes.cognitive_process import CognitiveProcess
-from cognitive_nodes.episode import episode_msg_to_obj
-from core_interfaces.srv import CreateNode, SetChangesTopic, UpdateNeighbor, StopExecution
+from cognitive_nodes.episode import container_msg_to_episode
+from core.utils import class_from_classname
+
+
+from core_interfaces.srv import StopExecution
 from cognitive_node_interfaces.msg import Activation
 from cognitive_processes_interfaces.msg import ControlMsg
-from cognitive_node_interfaces.msg import Episode as EpisodeMsg
-from std_msgs.msg import String
 
-from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
 
 
 class MainLoop(CognitiveProcess):
@@ -422,13 +416,13 @@ class MainLoop(CognitiveProcess):
         if not updates:
             self.get_logger().info("No update required in PNode/CNodes")
 
-    def add_point(self, name, sensing, node_type="pnode"):
-        response = super().add_point(name, sensing, node_type=node_type)
+    def add_point(self, name, sensing, node_type="pnode", confidence=1.0):
+        response = super().add_point(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = True
         return response
     
-    def add_antipoint(self, name, sensing, node_type="pnode"):
+    def add_antipoint(self, name, sensing, node_type="pnode", confidence=1.0):
         """
         Adds an antipoint to the specified PNode.
 
@@ -437,7 +431,7 @@ class MainLoop(CognitiveProcess):
         :param sensing: Sensing data to be used for the antipoint.
         :type sensing: dict
         """
-        response = super().add_antipoint(name, sensing, node_type=node_type)
+        response = super().add_antipoint(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = False
         return response
@@ -544,7 +538,8 @@ class MainLoop(CognitiveProcess):
 
 
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
-                self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                self.current_episode.update_reward(reward_list)
 
                 self.publish_episode()
 
@@ -557,13 +552,13 @@ class MainLoop(CognitiveProcess):
                     self.current_episode.perception = reset_sensing
                     self.current_episode.ltm_state = self.LTM_cache
 
-                # self.update_policies_to_test(
-                #     policy=(
-                #         self.current_policy
-                #         if not self.sensorial_changes(self.current_episode.perception, self.current_episode.old_perception)
-                #         else None
-                #     )
-                # )
+                self.update_policies_to_test(
+                    policy=(
+                        self.current_policy
+                        if not self.sensorial_changes(self.current_episode.perception, self.current_episode.old_perception)
+                        else None
+                    )
+                )
                 
                 self.update_status()
                 self.iteration += 1
@@ -616,7 +611,7 @@ class MainLoopLight(MainLoop):
         This method sends a request to the policy to be executed.
 
         :param perception: The perception to be used in the policy execution.
-        :type perception: dict
+        :type perception: core.container.Container
         :param policy: The policy to execute.
         :type policy: str
         :return: The response from executing the policy.
@@ -632,9 +627,9 @@ class MainLoopLight(MainLoop):
             service_name = "policy/" + str(policy) + "/execute"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(Execute, service_name)
-        perc_msg=perception_dict_to_msg(perception)
+        perc_msg=perception.to_msg()
         policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        episode = episode_msg_to_obj(policy_response.episode)
+        episode = container_msg_to_episode(policy_response.episode)
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, episode 
 
@@ -669,7 +664,7 @@ class MainLoopLight(MainLoop):
                     self.current_episode.perception = resulting_episode.perception
                 else:
                     self.current_episode.perception = self.read_perceptions()
-                self.current_episode.reward_list = resulting_episode.reward_list
+                self.current_episode.rewards = resulting_episode.rewards
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 
