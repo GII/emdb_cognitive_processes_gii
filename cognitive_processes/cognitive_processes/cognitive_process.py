@@ -352,16 +352,18 @@ class CognitiveProcess(Node):
         :param msg: Message that contains the perception.
         :type msg: core_interfaces.msg.Container
         """
-        if len(msg.max_size)>1:
+        if msg.max_size>1:
             self.get_logger().error(f'Received perception with multiple readings: ({msg.name}). Perception messages should (currently) include only one reading!')
-        elif len(msg.max_size)==1:
+        elif msg.max_size==1:
             node_name=msg.name
             if node_name in self.perception_cache:
                 if self.perception_cache[node_name]['data'] is None:
                     self.perception_cache[node_name]['data']=Container.from_msg(msg)
                 else:
                     self.perception_cache[node_name]['data'].push_from_msg(msg)
-                self.perception_cache[node_name]['updated']=True
+                reading_time = msg.timestamps[-1]
+                if reading_time > self.perception_time:
+                    self.perception_cache[node_name]['flag'].set()
             else:
                 self.get_logger().error(
                     "Received perception not registered in local perception cache!!!"
@@ -510,7 +512,7 @@ class CognitiveProcess(Node):
             self.node_clients[service_name] = ServiceClient(AddPoints, service_name)
 
         perception_msg = perception.to_msg()
-        response = self.node_clients[service_name].send_request(point=perception_msg, confidence=confidence)
+        response = self.node_clients[service_name].send_request(points=perception_msg, confidences=[confidence])
         self.get_logger().info(f"Added point in {node_type} {name}")
         self.get_logger().debug(f"POINT: {str(perception)}")
         return response.added
@@ -811,8 +813,8 @@ class CognitiveProcess(Node):
         """
         self.get_logger().info("Reading rewards...")
         rewards = {}
-        old_perception_msg = old_perception.to_msg()
-        perception_msg = perception.to_msg()
+        old_perception_msg = old_perception.to_msg() if old_perception else ContainerMsg()
+        perception_msg = perception.to_msg() if perception else ContainerMsg()
 
         for goal in self.active_goals:
             updated_reward=False

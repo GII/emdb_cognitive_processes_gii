@@ -512,7 +512,8 @@ class MainLoop(CognitiveProcess):
         self.current_episode.perception = self.read_perceptions()
         self.update_activations()
         self.active_goals = self.get_goals(self.LTM_cache)
-        self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        self.current_episode.update_reward(reward_list, self.get_clock().now()) 
         self.iteration = 1
         
         while (self.iteration <= self.iterations) and (not self.stop):
@@ -539,7 +540,7 @@ class MainLoop(CognitiveProcess):
 
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
                 reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
-                self.current_episode.update_reward(reward_list)
+                self.current_episode.update_reward(reward_list, self.get_clock().now())
 
                 self.publish_episode()
 

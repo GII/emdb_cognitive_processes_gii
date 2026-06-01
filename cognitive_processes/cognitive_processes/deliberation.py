@@ -344,7 +344,8 @@ class Deliberation(CognitiveProcess):
         self.update_activations()
         self.summary_episode.old_ltm_state = deepcopy(self.LTM_cache)
         self.active_goals = self.get_goals(self.LTM_cache)
-        self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        self.current_episode.update_reward(reward_list, self.get_clock().now())
         self.iteration = 1
         achieved = False
 
@@ -379,7 +380,7 @@ class Deliberation(CognitiveProcess):
                 
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
                 reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
-                self.current_episode.update_reward(reward_list, timestamp=self.get_clock().now().nanoseconds / 1e9)
+                self.current_episode.update_reward(reward_list, self.get_clock().now())
                 achieved = self.check_completion()
                 self.publish_episode()
                 self.iteration += 1
