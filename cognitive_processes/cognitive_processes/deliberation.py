@@ -4,7 +4,7 @@ import traceback
 from copy import deepcopy, copy
 from scipy.stats.qmc import LatinHypercube
 
-from cognitive_nodes.episode import Episode, episode_obj_to_msg, container_msg_to_episode
+from cognitive_nodes.episode import Episode, episode_obj_to_msg, container_msg_to_episode, container_to_episode_obj
 from core.container import Container
 from cognitive_processes.cognitive_process import CognitiveProcess
 from core.service_client import ServiceClient
@@ -21,8 +21,7 @@ class Deliberation(CognitiveProcess):
         """
         super().__init__(name, iterations, trials, LTM_id, **params)
         self.node = node
-        self.candidate_actions_num = candidate_actions
-        self.candidate_actions = None
+        self.candidate_actions = candidate_actions
         self.exploration_process = exploration_process
         self.summary_episode = Episode()
         self.summary_episode.parent_policy = self.node.name
@@ -88,31 +87,40 @@ class Deliberation(CognitiveProcess):
             self.semaphore.release()
             self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
 
-    def generate_candidate_actions(self, old_perception: Container = None, algorithm = "latin") -> Episode:
+    def generate_candidate_actions(self, states: Container = None, algorithm = "latin") -> Episode:
         """
         Generates a list of candidate Episode objects based on the configured actuation dimensions.
         Each Episode will have its old_perception set to the argument and action.actuation set to the candidate action.
         """
+        # Total candidates will be candidate_actions * number of states, but only one set of possible actions will be generated 
+        n_states = len(states) 
+        n_candidates = self.candidate_actions * n_states
+               
         if algorithm == "latin":
-            candidate_matrix = self.action_sampler.random(n=self.candidate_actions_num)
+            candidate_matrix = self.action_sampler.random(n=self.candidate_actions)
         elif algorithm == "random":
-            candidate_matrix = self.rng.random((self.candidate_actions_num, self.actuation_dims))
+            candidate_matrix = self.rng.random((self.candidate_actions, self.actuation_dims))
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
         
+        
         # Assign the candidate actions to the action container and create an episode for the candidates
         timestamp = self.get_clock().now().nanoseconds / 1e9
-        timestamps = np.full((self.candidate_actions_num,), timestamp)
-        self.action_container.push(candidate_matrix, timestamps)
+        timestamps = np.full((n_candidates,), timestamp)
+        tiled_candidate_matrix = np.tile(candidate_matrix, (n_states, 1))
+        
+        self.action_candidates_container = Container("action_candidates", max_size=n_candidates, container_type="action", labels=self.actuation_labels)
+        self.action_candidates_container.push(tiled_candidate_matrix, timestamps=timestamps)
         candidates_episode = Episode()
-        candidates_episode.action = self.action_container
+        candidates_episode.action = self.action_candidates_container
 
         # Tile the old perception for each candidate action
-        old_perception_tile = Container("old_perception", max_size=self.candidate_actions_num, container_type="perception", labels=old_perception.feature_labels)
-        fill_data = np.full((self.candidate_actions_num, len(old_perception.feature_labels)), old_perception.read().values[0, :])
-        old_perception_tile.push(fill_data, timestamps)
+        old_perception_tile = Container("old_perception", max_size=n_candidates, container_type="perception", labels=states.feature_labels)
+        states_data = states.read().values
+        repeated_states = np.repeat(states_data, self.candidate_actions, axis=0)
+        old_perception_tile.push(repeated_states, timestamps=timestamps)
         candidates_episode.old_perception = old_perception_tile
-        self.get_logger().info(f"Generated {self.candidate_actions_num} candidate episodes")
+        self.get_logger().info(f"Generated {n_candidates} candidate episodes. States: {n_states}, Candidates per state: {self.candidate_actions}")
         return candidates_episode
     
     def predict_perceptions(self, world_model, input_episodes: Episode) -> Episode:
@@ -144,7 +152,7 @@ class Deliberation(CognitiveProcess):
         """
         return self.node.predict(input_episodes)
     
-    def select_action(self, candidate_actions: Container, predicted_perceptions: Container, expected_utilities):
+    def select_action(self, candidate_actions: Container, predicted_perceptions: Episode, expected_utilities):
         """
         Selects an action probabilistically using softmax over the expected utilities.
         """
@@ -161,8 +169,8 @@ class Deliberation(CognitiveProcess):
         else:
             selected_index = np.argmax(expected_utilities)
         selected_action = candidate_actions.read(selected_index).values
-        predicted_state = predicted_perceptions.read(selected_index)
-        self.action_container.push(selected_action, timestamp=self.get_clock().now().nanoseconds / 1e9)
+        predicted_state = predicted_perceptions.perception.read(selected_index)
+        self.action_container.push(selected_action, timestamps=self.get_clock().now().nanoseconds / 1e9)
         self.get_logger().info(f"Selected action: {selected_action} with utility {expected_utilities[selected_index]}")
         self.get_logger().info(f"Expected perception: {predicted_state}")
         return self.action_container
@@ -290,12 +298,12 @@ class Deliberation(CognitiveProcess):
             if (reward > threshold):
                 reward_list.pop(goal)
                 if not point_added:
-                    trace = Container.from_dataarray(self.node.episodic_buffer.traces_buffer.read_flattened(-1), container_type="trace")
+                    trace = container_to_episode_obj(self.node.episodic_buffer.traces_buffer.read_flattened(-1))
                     self.add_pnode_trace(pnode, trace)
                     updates = True
                     point_added = True
-            elif pnode_activation > threshold and len(self.node.episodic_buffer.antitraces_buffer) > 0:
-                antitrace = Container.from_dataarray(self.node.episodic_buffer.antitraces_buffer.read_flattened(-1), container_type="antitrace")
+            elif pnode_activation > threshold and self.node.episodic_buffer.antitraces_buffer.n_traces > 0:
+                antitrace = container_to_episode_obj(self.node.episodic_buffer.antitraces_buffer.read_flattened(-1))
                 self.add_pnode_antitrace(pnode, antitrace)
                 updates = True
 
@@ -314,25 +322,33 @@ class Deliberation(CognitiveProcess):
         if not updates:
             self.get_logger().info("No update required in PNode/CNodes")
 
-    def add_pnode_trace(self, pnode: str, trace: Container, confidence: float = 1.0):
+    def add_pnode_trace(self, pnode: str, trace: Episode, confidence: float = 1.0):
         confidences = np.full(len(trace), confidence)
         added = self.add_pnode_points(pnode, trace, confidences)
         return added
 
-    def add_pnode_antitrace(self, pnode: str, antitrace: Container, confidence: float = 1.0):
+    def add_pnode_antitrace(self, pnode: str, antitrace: Episode, confidence: float = 1.0):
         confidences = np.full(len(antitrace), -confidence)
         added = self.add_pnode_points(pnode, antitrace, confidences)
         return added
 
-    def add_pnode_points(self, pnode: str, trace: Container, confidences: np.ndarray):
+    def add_pnode_points(self, pnode: str, trace: Episode, confidences: np.ndarray):
         service_name = "pnode/" + str(pnode) + "/add_points"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(
                 AddPoints, service_name
             )
-        points = trace.to_msg()
-        response = self.node_clients[service_name].send_request(points=points, confidences=confidences.tolist())
+        points = trace.perception # TODO: Remove the last element of this container, shouldn't be included as part of the trace data
+        response = self.node_clients[service_name].send_request(points=points.to_msg(), confidences=confidences.tolist())
         return response.added
+    
+    def initialize_buffer(self):
+        self.get_logger().info("Initializing episodic buffer...")
+        self.current_episode.perception = self.read_perceptions()
+        self.node.episodic_buffer.semaphore.acquire()
+        if (not self.node.episodic_buffer.input_labels and self.node.episodic_buffer.inputs) or (not self.node.episodic_buffer.output_labels and self.node.episodic_buffer.outputs):
+            self.node.episodic_buffer.configure_labels(self.current_episode)
+        self.node.episodic_buffer.semaphore.release()
 
     def deliberation_cycle(self):
         self.start_flag.wait()
@@ -369,7 +385,7 @@ class Deliberation(CognitiveProcess):
                 # SELECT ACTION
                 self.current_episode.action = self.select_action(candidates.action, predicted_episodes, predicted_utilities)
                 # EXECUTE ACTION
-                self.execute_action(self.current_episode.perception, self.current_episode.action)
+                self.execute_action(self.current_episode.action)
                 self.current_episode.parent_policy = self.node.name if not self.exploration_process else ""
                 self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
                 self.update_activations()
@@ -385,7 +401,8 @@ class Deliberation(CognitiveProcess):
                 self.publish_episode()
                 self.iteration += 1
         self.summary_episode.perception = self.current_episode.perception
-        self.summary_episode.reward_list = self.current_episode.reward_list
+        self.summary_episode.rewards = self.current_episode.rewards
+        self.summary_episode.action = self.current_episode.action
         if not achieved and hasattr(self.node.episodic_buffer, "add_antitrace"):
             self.node.episodic_buffer.add_antitrace()
         if not self.exploration_process:
@@ -395,8 +412,7 @@ class Deliberation(CognitiveProcess):
     
 
     def run(self):
-        self.current_episode.perception = self.read_perceptions()
-        self.node.episodic_buffer.configure_labels(self.current_episode)
+        self.initialize_buffer()
         while True:
             try:
                 self.deliberation_cycle()

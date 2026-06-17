@@ -666,6 +666,7 @@ class MainLoopLight(MainLoop):
                 else:
                     self.current_episode.perception = self.read_perceptions()
                 self.current_episode.rewards = resulting_episode.rewards
+                self.current_episode.action = resulting_episode.action
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 

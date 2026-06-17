@@ -241,14 +241,6 @@ class CognitiveProcess(Node):
     # =========================
     # ACTION EXECUTION
     # =========================
-    def execute_action(self, perception, action):
-        if action.policy_id != 0:
-            # Execute a policy
-            raise NotImplementedError("Implementation of ID to policy mapping is TBD")
-            policy, action = self.execute_policy(perception, action.policy_id)
-        else:
-            return self.execute_actuation(action.actuation)
-
     def execute_policy(self, perception, policy):
         """
         Execute a policy.
@@ -270,17 +262,17 @@ class CognitiveProcess(Node):
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, episode 
     
-    def execute_actuation(self, actuation):
+    def execute_action(self, action):
         """
         Execute an action by sending it to the action service.
 
-        :param actuation: The actuation dictionary containing the action details.
-        :type actuation: core.container.Container
+        :param action: The action to execute.
+        :type action: core.container.Container
         :return: The response from the action service.
         :rtype: cognitive_node_interfaces.srv.Execute.Response
         """
         if self.action_client:
-            actuation_msg = actuation.to_msg()
+            actuation_msg = action.to_msg()
             response = self.action_client.send_request(action=actuation_msg)
             self.get_logger().info("Executed action with response: " + str(response))
             return response
@@ -339,7 +331,7 @@ class CognitiveProcess(Node):
 
         # Write the perceptions in the perception container and return it
         perception_data = [self.perception_cache[sensor]["data"] for sensor in self.perception_cache.keys()]
-        self.latest_perception = consolidate_containers(perception_data)
+        self.latest_perception = consolidate_containers(perception_data, name="perception", container_type="perception")
         self.get_logger().debug("DEBUG Read Perceptions: " + str(self.latest_perception))
         return self.latest_perception
 
@@ -383,7 +375,7 @@ class CognitiveProcess(Node):
         :return: Boolean that indicates if there is a sensorial change.
         :rtype: bool
         """
-        self.sensorial_changes_val = compare_perceptions(sensing, old_sensing, threshold, label_mode="equal")
+        self.sensorial_changes_val = not compare_perceptions(sensing, old_sensing, threshold, label_mode="equal")
         return self.sensorial_changes_val
 
     # =========================
@@ -538,7 +530,7 @@ class CognitiveProcess(Node):
             )
 
         perception = perception.to_msg()
-        response = self.node_clients[service_name].send_request(point=perception, confidence=-1.0*confidence)
+        response = self.node_clients[service_name].send_request(points=perception, confidences=[-1.0*confidence])
         self.get_logger().info(f"Added anti-point in {node_type} {name}")
         self.get_logger().debug(f"ANTI-POINT: {str(perception)}")
         return response.added
