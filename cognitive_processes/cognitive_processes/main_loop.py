@@ -29,6 +29,9 @@ from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
 
 from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
+from cognitive_node_interfaces.srv import ContainsSpace
+import hashlib
+import json
 
 class Episode():
     """
@@ -96,6 +99,8 @@ class MainLoop(Node):
         self.sensorial_changes_val = False
         self.softmax_selection = False
         self.softmax_temperature = 1
+        self.ablation_mode = params.get('ablation_mode', 'NA')  # 'FULL' o 'NA' (Non-Abstracting)
+        self.get_logger().info(f"ablation_mode: {self.ablation_mode}")
         
         self.get_logger().info(f"POLICY SELECTION CONFIG - softmax: {self.softmax_selection}, temperature: {self.softmax_temperature}, threshold: {self.activation_threshold}")
         self.pnodes_success = {}
@@ -932,7 +937,16 @@ class MainLoop(Node):
         :param stm: Episode object containing the information to update the LTM.
         :type stm: cognitive_processes.main_loop.Episode
         """
-        self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
+        # If configured, use the lookup variant that searches existing PNodes
+        # before creating new ones. This can be enabled from the experiment
+        # configuration by setting `use_pnode_lookup: true` for this node.
+        if getattr(self, "use_pnode_lookup", False):
+            self.get_logger().info("update_ltm: using update_pnodes_reward_basis_with_lookup")
+            self.update_pnodes_reward_basis_with_lookup(
+                stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state
+            )
+        else:
+            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.policy, copy(stm.reward_list), stm.old_ltm_state)
 
 
     def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
@@ -1017,24 +1031,146 @@ class MainLoop(Node):
                         updates = True
                         point_added = True
                 elif pnode_activation > threshold:
+                    if getattr(self, 'use_pnode_lookup', False):
+                        container = self.find_pnode_for_point(old_perception)
+                        if container:
+                            self.add_antipoint(container, old_perception)
+                        else:
+                            self.new_cnode(old_perception, goal, policy, confidence=-1.0)
+                    else:
+                        self.add_antipoint(pnode, old_perception)
+                    updates = True
+
+        for goal, reward in reward_list.items():
+            if (reward > threshold) and (not point_added):
+                if goal not in self.unlinked_drives:
+                    self.new_cnode(old_perception, goal, policy, confidence=1.0)
+                else:
+                    drive = goal
+                    goal = self.new_goal(perception, drive)
+                    self.new_cnode(old_perception, goal, policy, confidence=1.0)
+                point_added=True
+                updates = True
+
+        if not updates:
+            self.get_logger().info("No update required in PNode/CNodes")
+        if not updates:
+            self.get_logger().info("No update required in PNode/CNodes")
+
+    def update_pnodes_reward_basis_with_lookup(self, old_perception, perception, policy, reward_list, ltm_cache):
+        """
+        Alternative update that looks for an existing PNode containing the point
+        before creating a new one. Keeps original behavior untouched.
+        """
+        self.get_logger().info("Updating p-nodes/c-nodes (with lookup)...")
+        policy_neighbors = self.request_neighbors(policy)
+        cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
+        cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
+        threshold = self.activation_threshold
+        updates = False
+        point_added = False
+
+        for cnode in cnode_activations.keys():
+            cnode_neighbors = self.request_neighbors(cnode)
+            world_model = next((neighbor["name"] for neighbor in cnode_neighbors if neighbor["node_type"] == "WorldModel"), None)
+            goal = next((neighbor["name"] for neighbor in cnode_neighbors if neighbor["node_type"] == "Goal"), None)
+            pnode = next((neighbor["name"] for neighbor in cnode_neighbors if neighbor["node_type"] == "PNode"), None)
+
+            if world_model:
+                world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
+            else:
+                world_model_activation = 1.0
+            if goal:
+                goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
+            else:
+                goal_activation = 1.0
+            if pnode:
+                pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
+            else:
+                pnode_activation = 1.0
+
+            if world_model_activation > threshold and goal_activation > threshold:
+                reward = reward_list.get(goal, 0.0)
+                if (reward > threshold):
+                    reward_list.pop(goal)
+                    if not point_added:
+                        container = self.find_pnode_for_point(old_perception)
+                        if container:
+                            self.get_logger().info(f'Found existing PNode {container} containing the point; trying to add point there')
+                            added = self.add_point(container, old_perception)
+                            if not added:
+                                self.get_logger().info(f'Existing PNode {container} did not accept the point; creating new CNode/PNode')
+                                self.new_cnode(old_perception, goal, policy, confidence=1.0)
+                            else:
+                                self.get_logger().info(f'Point added to existing PNode {container}')
+                        else:
+                            self.get_logger().info('No existing PNode contains point; creating new CNode/PNode')
+                            self.new_cnode(old_perception, goal, policy, confidence=1.0)
+                        updates = True
+                        point_added = True
+                elif pnode_activation > threshold:
                     self.add_antipoint(pnode, old_perception)
                     updates = True
 
         for goal, reward in reward_list.items():
             if (reward > threshold) and (not point_added):
                 if goal not in self.unlinked_drives:
-                    self.new_cnode(old_perception, goal, policy)
+                    self.new_cnode(old_perception, goal, policy, confidence=1.0)
                 else:
                     drive = goal
                     goal = self.new_goal(perception, drive)
-                    self.new_cnode(old_perception, goal, policy)
+                    self.new_cnode(old_perception, goal, policy, confidence=1.0)
                 point_added=True
                 updates = True
 
         if not updates:
-            self.get_logger().info("No update required in PNode/CNodes")
+            self.get_logger().info("No update required in PNode/CNodes (with lookup)")
 
-    def add_point(self, name, sensing):
+    def find_pnode_for_point(self, perception):
+        """
+        Check all known PNodes and return the first that contains the given perception.
+        Returns the pnode name or None.
+        """
+        # Convert perception dict to flattened labels/data/confidences expected by ContainsSpace
+        labels = []
+        data = []
+        confidences = []
+        i = 0
+        # perception is expected to be a dict of sensor -> [ {attr: val} ]
+        for sensor, entries in perception.items():
+            if isinstance(entries, (list, tuple)) and entries:
+                attrs = entries[0]
+                for attr, val in attrs.items():
+                    labels.append(f"{i}-{sensor}-{attr}")
+                    try:
+                        data.append(float(val))
+                    except Exception:
+                        data.append(0.0)
+                    i += 1
+
+        # We are checking a single foreign point, so memberships/confidences
+        # must be for the number of data points (1). Passing one membership
+        # value prevents the PointBasedSpace population size mismatch.
+        if data:
+            confidences = [1.0]
+        else:
+            confidences = []
+
+        # Iterate over known PNodes in LTM cache
+        for pnode_name in list(self.LTM_cache.get('PNode', {}).keys()):
+            service_name = f"pnode/{pnode_name}/contains_space"
+            try:
+                if service_name not in self.node_clients:
+                    self.node_clients[service_name] = ServiceClient(ContainsSpace, service_name)
+                resp = self.node_clients[service_name].send_request(labels=labels, data=data, confidences=confidences)
+                if getattr(resp, 'contained', False):
+                    return pnode_name
+            except Exception as e:
+                self.get_logger().debug(f'find_pnode_for_point: error calling {service_name}: {e}')
+                continue
+        return None
+
+    def add_point(self, name, sensing, confidence=1.0):
         """
         Sends the request to add a point to a P-Node.
 
@@ -1051,11 +1187,16 @@ class MainLoop(Node):
             self.node_clients[service_name] = ServiceClient(AddPoint, service_name)
 
         perception = perception_dict_to_msg(sensing)
-        response = self.node_clients[service_name].send_request(point=perception, confidence=1.0)
-        self.get_logger().info(f"Added point in pnode {name}")
-        self.get_logger().debug(f"POINT: {str(sensing)}")
-        self.pnodes_success[name] = True
-        return response.added
+        response = self.node_clients[service_name].send_request(point=perception, confidence=confidence)
+        added = getattr(response, 'added', False)
+        if added:
+            self.get_logger().info(f"Added point in pnode {name}")
+            self.pnodes_success[name] = True
+        else:
+            self.get_logger().warning(f"Failed to add point in pnode {name}")
+            self.pnodes_success[name] = False
+        self.get_logger().debug(f"POINT: {str(sensing)} added={added}")
+        return added
 
     def add_antipoint(self, name, sensing):
         """
@@ -1077,12 +1218,16 @@ class MainLoop(Node):
 
         perception = perception_dict_to_msg(sensing)
         response = self.node_clients[service_name].send_request(point=perception, confidence=-1.0)
-        self.get_logger().info(f"Added anti-point in pnode {name}")
-        self.get_logger().debug(f"ANTI-POINT: {str(sensing)}")
-        self.pnodes_success[name] = False
-        return response.added
+        added = getattr(response, 'added', False)
+        if added:
+            self.get_logger().info(f"Added anti-point in pnode {name}")
+            self.pnodes_success[name] = False
+        else:
+            self.get_logger().warning(f"Failed to add anti-point in pnode {name}")
+        self.get_logger().debug(f"ANTI-POINT: {str(sensing)} added={added}")
+        return added
 
-    def new_cnode(self, perception, goal, policy):
+    def new_cnode(self, perception, goal, policy, confidence=1.0):
         """
         This method creates a new C-Node/P-Node pair.
 
@@ -1102,14 +1247,26 @@ class MainLoop(Node):
         pnode_class = self.default_class.get("PNode")
         cnode_class = self.default_class.get("CNode")
 
-        pnode_name = f"pnode_{ident}"
+        # By default create one PNode per (world,goal,policy) identity.
+        # If `unique_pnode_per_point` is True, append a digest computed
+        # from the perception so each different point gets its own PNode.
+        if getattr(self, 'unique_pnode_per_point', False) and perception:
+            try:
+                signature = json.dumps(perception, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+            except Exception:
+                # Fallback: stringify in a permissive way
+                signature = str(perception)
+            digest = hashlib.sha1(signature.encode('utf-8')).hexdigest()[:10]
+            pnode_name = f"pnode_{ident}_{digest}"
+        else:
+            pnode_name = f"pnode_{ident}"
         pnode = self.create_node_client(
             name=pnode_name, class_name=pnode_class, parameters={"space_class": space_class}
         )
 
         if not pnode:
             self.get_logger().fatal(f"Failed creation of PNode {pnode_name}")
-        self.add_point(pnode_name, perception)
+        self.add_point(pnode_name, perception, confidence=confidence)
 
         neighbor_dict = {world_model: "WorldModel", pnode_name: "PNode", goal: "Goal"}
         neighbors = {
@@ -1177,13 +1334,19 @@ class MainLoop(Node):
 
         self.get_logger().info("Requesting node creation")
         params_str = yaml.dump(parameters, sort_keys=False)
+        self.get_logger().debug(f"CreateNode params for {name}: {params_str}")
         service_name = "commander/create"
         if service_name not in self.node_clients:
             self.node_clients[service_name] = ServiceClient(CreateNode, service_name)
         response = self.node_clients[service_name].send_request(
             name=name, class_name=class_name, parameters=params_str
         )
-        return response.created
+        created = getattr(response, 'created', False)
+        if created:
+            self.get_logger().info(f"Node created: {name}")
+        else:
+            self.get_logger().warning(f"Node creation failed: {name}")
+        return created
     
 
 
