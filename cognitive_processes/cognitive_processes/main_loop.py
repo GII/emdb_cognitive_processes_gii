@@ -28,7 +28,7 @@ from cognitive_processes_interfaces.msg import ControlMsg
 from cognitive_processes_interfaces.msg import Episode as EpisodeMsg
 from std_msgs.msg import String
 
-from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
+from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname, resolve_seed
 from cognitive_node_interfaces.srv import ContainsSpace
 import hashlib
 import json
@@ -91,6 +91,9 @@ class MainLoop(Node):
         self.policies_to_test = []
         self.files = []
         self.default_class = {}
+        # 0/None means "no seed requested" -> resolved to a random time-based
+        # seed in setup(). The commander normally injects a concrete seed via
+        # params, which overrides this default.
         self.random_seed = 0
         self.current_reward = 0
         self.current_world = None
@@ -136,6 +139,8 @@ class MainLoop(Node):
         Initial configuration of the MainLoop node.
         This method sets up the LTM, perceptions, files, connectors, control channel, etc.
         """
+        self.random_seed = resolve_seed(self.random_seed)
+        self.get_logger().info(f"MainLoop using random seed {self.random_seed}")
         self.rng = numpy.random.default_rng(self.random_seed)
         self.read_ltm()
         self.configure_perceptions()
@@ -1333,6 +1338,12 @@ class MainLoop(Node):
         """
 
         self.get_logger().info("Requesting node creation")
+        # Propagate the global seed to every dynamically created node (PNodes,
+        # CNodes, Goals, ...) so their stochastic behaviour is reproducible. An
+        # explicit random_seed in the caller's parameters takes precedence.
+        if isinstance(parameters, dict):
+            parameters = dict(parameters)
+            parameters.setdefault('random_seed', self.random_seed)
         params_str = yaml.dump(parameters, sort_keys=False)
         self.get_logger().debug(f"CreateNode params for {name}: {params_str}")
         service_name = "commander/create"
