@@ -15,7 +15,8 @@ from std_msgs.msg import String
 from core_interfaces.msg import Container as ContainerMsg
 from core_interfaces.srv import SetChangesTopic, GetNodeFromLTM, UpdateNeighbor, CreateNode
 from cognitive_node_interfaces.msg import Activation
-from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute
+from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateGoal, LogExecution
+from cognitive_processes_interfaces.srv import Pause
 
 class CognitiveProcess(Node):
     """
@@ -26,6 +27,7 @@ class CognitiveProcess(Node):
         Constructor of the CognitiveProcess class.
         """
         super().__init__(name)
+        self.name = name
         # --- Loop control variables ---
         self.iteration = 0
         self.iterations = iterations
@@ -71,6 +73,8 @@ class CognitiveProcess(Node):
         )  # Keys are service name, values are service client object
 
         self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
+
+        self.pause_service = self.create_service(Pause, f"{self.name}/pause", self.pause_callback, callback_group=self.cbgroup_server)
 
 
     # =========================
@@ -584,6 +588,21 @@ class CognitiveProcess(Node):
 
         self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of deleting CNodes
         return cnode_name
+    
+    def log_cnode_execution(self, cnode_name, success):
+        """
+        This method logs the execution of a C-Node.
+
+        :param cnode_name: Name of the C-Node that was executed.
+        :type cnode_name: str
+        :param success: Boolean indicating whether the execution was successful.
+        :type success: bool
+        """
+        logging_service = f"cnode/{cnode_name}/log_execution"
+        if logging_service not in self.node_clients:
+            self.node_clients[logging_service] = ServiceClient(LogExecution, logging_service)
+        response = self.node_clients[logging_service].send_request(success=success)
+        return response.added
 
     def new_goal(self, perception, drive):
         """
@@ -616,6 +635,26 @@ class CognitiveProcess(Node):
         if not goal:
             self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
         return goal_name
+    
+    def duplicate_goal(self, goal_name, perception):
+        """
+        This method duplicates a Goal node and adds a new point to it.
+
+        :param goal_name: Name of the Goal node to be duplicated.
+        :type goal_name: str
+        :param perception: Perception to be added as a point in the duplicated Goal.
+        :type perception: core.container.Container
+        :return: Name of the duplicated Goal node.
+        :rtype: str
+        """
+        duplicate_service = f"goal/{goal_name}/duplicate_goal"
+        if duplicate_service not in self.node_clients:
+            self.node_clients[duplicate_service] = ServiceClient(DuplicateGoal, duplicate_service)
+        response = self.node_clients[duplicate_service].send_request()
+        new_goal_name = response.duplicate_goal_name
+        self.add_point(new_goal_name, perception, node_type="goal")
+        return new_goal_name
+
 
     def create_node_client(self, name, class_name, parameters={}):
         """
@@ -916,9 +955,71 @@ class CognitiveProcess(Node):
 
         return satisfaction
     
+    def goal_has_cnode(self, goal, ltm_cache):
+        """
+        This method checks if a C-Node exists for a given goal in the LTM cache.
+
+        :param goal: Name of the goal to check for a corresponding C-Node.
+        :type goal: str
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: True if a C-Node exists for the given goal, False otherwise.
+        :rtype: bool
+        """
+        cnodes = ltm_cache["CNode"].keys()
+        neighbors = []
+        for cnode in cnodes:
+            neighbors += [neighbor["name"] for neighbor in ltm_cache["CNode"][cnode]["neighbors"] if neighbor["node_type"] == "Goal"]
+        return goal in neighbors
+    
+    def duplicate_connected(self, goal, cnodes, ltm_cache):
+        """
+        This method checks if a C-Node exists for any duplicate of a given goal that is connected to a specific policy in the LTM cache.
+
+        :param goal: Name of the goal to check for duplicates.
+        :type goal: str
+        :param cnodes: List of C-Nodes to check for connections.
+        :type cnodes: list
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :return: True if a C-Node exists for any duplicate of the given goal that is connected to the specified policy, False otherwise.
+        :rtype: bool
+        """
+        if "_dup_" in goal:
+            base_goal = goal.split("_dup_")[0]
+        else:
+            base_goal = goal
+        
+        for cnode in cnodes:
+            duplicate = [base_goal in neighbor["name"] for neighbor in ltm_cache["CNode"][cnode]["neighbors"] if neighbor["node_type"] == "Goal"]
+            if any(duplicate):
+                self.get_logger().info(f"Duplicate of {base_goal} found in CNode {cnode}")
+                return True
+        return False
+
+    
     # =========================
     # Process Execution
     # =========================
+
+    def pause_callback(self, request, response):
+        """
+        Callback function to handle pause requests for the cognitive process.
+
+        :param request: The incoming request to pause the process.
+        :type request: cognitive_node_interfaces.srv.Pause.Request
+        :param response: The response object to be filled and returned.
+        :type response: cognitive_node_interfaces.srv.Pause.Response
+        :return: The response indicating whether the process was paused successfully.
+        :rtype: cognitive_node_interfaces.srv.Pause.Response
+        """
+        self.paused = request.pause
+        if self.paused:
+            self.get_logger().info("Cognitive process paused.")
+        else:
+            self.get_logger().info("Cognitive process resumed.")
+        response.success = True
+        return response
 
     def run(self):
         """
