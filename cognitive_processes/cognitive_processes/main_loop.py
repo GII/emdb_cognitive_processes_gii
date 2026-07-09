@@ -399,11 +399,12 @@ class MainLoop(CognitiveProcess):
                         self.add_point(pnode, old_perception)
                         updates = True
                         point_added = True
-                    if pnode_activation > threshold:
-                        self.log_cnode_execution(cnode, True)
+                        if pnode_activation > threshold:
+                            self.log_cnode_execution(cnode, True)
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, old_perception)
-                    self.log_cnode_execution(cnode, False)
+                    if not point_added:
+                        self.log_cnode_execution(cnode, False)
                     updates = True
 
         for goal in goals_activations.keys():

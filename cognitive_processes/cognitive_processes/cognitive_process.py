@@ -585,6 +585,7 @@ class CognitiveProcess(Node):
 
         if not cnode or not policy_success:
             self.get_logger().fatal(f"Failed creation of CNode {cnode_name}")
+        self.log_cnode_execution(cnode_name, success=True)
 
         self.n_cnodes = self.n_cnodes + 1  # TODO: Consider the posibility of deleting CNodes
         return cnode_name
