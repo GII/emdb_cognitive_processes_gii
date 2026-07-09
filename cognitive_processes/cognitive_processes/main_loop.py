@@ -358,6 +358,7 @@ class MainLoop(CognitiveProcess):
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
         cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
+        goals_activations = self.get_node_activations_by_list(reward_list.keys(), ltm_cache)
         threshold = self.activation_threshold
         updates = False
         point_added = False
@@ -398,18 +399,26 @@ class MainLoop(CognitiveProcess):
                         self.add_point(pnode, old_perception)
                         updates = True
                         point_added = True
+                        if pnode_activation > threshold:
+                            self.log_cnode_execution(cnode, True)
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, old_perception)
+                    if not point_added:
+                        self.log_cnode_execution(cnode, False)
                     updates = True
 
-        for goal, reward in reward_list.items():
+        for goal in goals_activations.keys():
+            reward = reward_list.get(goal, 0.0)
             if (reward > threshold) and (not point_added):
                 if goal not in self.unlinked_drives:
-                    self.new_cnode(old_perception, goal, policy)
+                    if not self.duplicate_connected(goal, cnodes, ltm_cache): # Filter out duplicates of the goal in the CNodes connected to the policy
+                        if self.goal_has_cnode(goal, ltm_cache):
+                            goal = self.duplicate_goal(goal, perception)
+                        self.new_cnode(old_perception, goal, policy)
                 else:
                     drive = goal
-                    goal = self.new_goal(perception, drive)
-                    self.new_cnode(old_perception, goal, policy)
+                    new_goal = self.new_goal(perception, drive)
+                    self.new_cnode(old_perception, new_goal, policy)
                 point_added=True
                 updates = True
 
@@ -523,12 +532,14 @@ class MainLoop(CognitiveProcess):
                 self.get_logger().info(
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
+                self.current_world = self.get_current_world_model()
                 self.publish_iteration()
                 self.update_activations()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, _ = self.execute_policy(self.current_episode.perception, self.current_policy)
                 self.current_episode.parent_policy = self.current_policy
+                self.current_episode.domain_name = self.current_world if self.current_world else ""
                 self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
@@ -660,6 +671,7 @@ class MainLoopLight(MainLoop):
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, resulting_episode = self.execute_policy(self.current_episode.perception, self.current_policy)
                 self.current_episode.parent_policy = self.current_policy
+                self.current_episode.domain_name = resulting_episode.domain_name
                 self.current_episode.old_perception = self.current_episode.perception
                 if resulting_episode.perception:
                     self.current_episode.perception = resulting_episode.perception

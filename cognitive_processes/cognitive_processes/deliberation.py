@@ -357,6 +357,7 @@ class Deliberation(CognitiveProcess):
         self.current_world = self.get_current_world_model()
         self.current_episode.perception = self.read_perceptions()
         self.summary_episode.old_perception = self.current_episode.perception
+        self.current_episode.domain_name = self.current_world if self.current_world else ""
         self.update_activations()
         self.summary_episode.old_ltm_state = deepcopy(self.LTM_cache)
         self.active_goals = self.get_goals(self.LTM_cache)
@@ -403,6 +404,7 @@ class Deliberation(CognitiveProcess):
         self.summary_episode.perception = self.current_episode.perception
         self.summary_episode.rewards = self.current_episode.rewards
         self.summary_episode.action = self.current_episode.action
+        self.summary_episode.domain_name = self.current_episode.domain_name
         if not achieved and hasattr(self.node.episodic_buffer, "add_antitrace"):
             self.node.episodic_buffer.add_antitrace()
         if not self.exploration_process:
