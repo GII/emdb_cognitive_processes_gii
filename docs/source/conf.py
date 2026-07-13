@@ -34,6 +34,7 @@ autodoc_mock_imports = [
     "rclpy",
     "std_msgs",
     "core",
+    "cognitive_nodes",
     "cognitive_processes_interfaces",
     "core_interfaces",
     "cognitive_node_interfaces",
@@ -43,6 +44,7 @@ autodoc_mock_imports = [
     "rclpy.executors",
     "rclpy.callback_groups",
     "rclpy.time",
+    "scipy",
 ]
 
 # -- Options for HTML output -------------------------------------------------

@@ -1,28 +1,19 @@
-===========================
-Main Loop API Documentation
-===========================
+======================================
+Cognitive Processes API Documentation
+======================================
 
 Here you can find a description of the Main Loop script, its specific topics, and the documentation of its methods.
 
-+++++++++
-Episode
-+++++++++
 
-The Episode class is used as the Short Term Memory (STM) by the Main Loop of the cognitive architecture. 
+++++++++++++++++++++
+Cognitive Processes
+++++++++++++++++++++
 
-.. autoclass:: cognitive_processes.main_loop.Episode
+Base class for all cognitive processes in the architecture. It provides common functionalities and interfaces for different cognitive processes.
+
+.. automodule:: cognitive_processes.cognitive_process
     :members:
     :show-inheritance:
-
-**Attributes**
-
-* **old_perception** (dict): Previous perceptual data from the environment.
-* **old_ltm_state** (dict): Previous state of the Long Term Memory.
-* **policy** (str): Name of the policy being executed.
-* **actuation** (dict): Values of actuators for the executed policy
-* **perception** (dict): Current perceptual data from the environment.
-* **ltm_state** (dict): Current state of the Long Term Memory.
-* **reward_list** (dict): Dictionary mapping goals to their reward values.
 
 
 +++++++++
@@ -46,6 +37,19 @@ the topic is defined in the experiment configuration file (usually main_loop/con
 /{episodes_topic} => Publishes episode data including perceptions, policies, actuations, and rewards for each execution cycle.
 The name of the topic is defined in the experiment configuration file (usually main_loop/episodes).
 
-.. autoclass:: cognitive_processes.main_loop.MainLoop
+.. automodule:: cognitive_processes.main_loop
     :members:
     :show-inheritance:
+
+
++++++++++++++
+Deliberation
++++++++++++++
+
+Python class that implements the Deliberation process of the cognitive architecture. The Deliberation process is responsible for selecting the most appropriate action or policy to execute based on the current state of the system, the predicted states and the current goal.
+It is instantiated in the Utility Models.
+
+.. automodule:: cognitive_processes.deliberation
+    :members:
+    :show-inheritance:
+
