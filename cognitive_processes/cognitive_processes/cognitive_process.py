@@ -8,7 +8,7 @@ from rclpy.time import Time
 
 from cognitive_nodes.episode import Episode, episode_obj_to_msg
 from core.service_client import ServiceClient
-from core.utils import class_from_classname, compare_perceptions
+from core.utils import class_from_classname, compare_perceptions, resolve_seed
 from core.container import Container, consolidate_containers
 
 from std_msgs.msg import String
@@ -96,6 +96,8 @@ class CognitiveProcess(Node):
         Initial configuration of the MainLoop node.
         This method sets up the LTM, perceptions, files, connectors, control channel, etc.
         """
+        self.random_seed = resolve_seed(self.random_seed)
+        self.get_logger().info(f"Cognitive process using random seed {self.random_seed}")
         self.rng = np.random.default_rng(self.random_seed)
         self.read_ltm()
         self.configure_perceptions()

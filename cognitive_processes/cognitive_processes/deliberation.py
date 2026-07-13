@@ -165,7 +165,7 @@ class Deliberation(CognitiveProcess):
             probs = exp_utilities / np.sum(exp_utilities)
             probs = probs.reshape(-1)
             # Sample an index according to the probabilities
-            selected_index = np.random.choice(len(candidate_actions), p=probs)
+            selected_index = self.rng.choice(len(candidate_actions), p=probs)
         else:
             selected_index = np.argmax(expected_utilities)
         selected_action = candidate_actions.read(selected_index).values
