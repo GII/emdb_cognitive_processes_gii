@@ -1,3 +1,4 @@
 bool pause # True to pause the cognitive process, False to resume it.
+bool stop # True to stop the cognitive process, this might finish the 
 ---
 bool success

@@ -1032,10 +1032,13 @@ class CognitiveProcess(Node):
         :rtype: cognitive_node_interfaces.srv.Pause.Response
         """
         self.paused = request.pause
+        self.stop = request.stop
         if self.paused:
             self.get_logger().info("Cognitive process paused.")
         else:
             self.get_logger().info("Cognitive process resumed.")
+        if self.stop:
+            self.get_logger().info("Cognitive process stopped.")
         response.success = True
         return response
 
