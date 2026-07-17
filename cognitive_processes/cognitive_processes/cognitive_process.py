@@ -1039,6 +1039,7 @@ class CognitiveProcess(Node):
             self.get_logger().info("Cognitive process resumed.")
         if self.stop:
             self.get_logger().info("Cognitive process stopped.")
+            self.iterations = self.iteration # Store the current iteration count before stopping
         response.success = True
         return response
 
