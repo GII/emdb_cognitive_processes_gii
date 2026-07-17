@@ -193,49 +193,32 @@ class MainLoop(CognitiveProcess):
 
         policy_activations={}
         all_policy_activations={}
-        
-        self.get_logger().info(f"SELECT_POLICY - Starting selection. Activation threshold: {self.activation_threshold}")
-        self.get_logger().info(f"SELECT_POLICY - Policies to test: {policies_filtered}")
-        
         for policy in policies_filtered:
             act=self.LTM_cache["Policy"][policy]["activation"]
-            self.get_logger().info(f"SELECT_POLICY - Policy {policy}: activation={act:.4f}, threshold={self.activation_threshold}, passes={'YES' if act > self.activation_threshold else 'NO'}")
             if act>self.activation_threshold: #Filters out non-activated policies
                 policy_activations[policy]=act
 
         for policy in policies:
             all_policy_activations[policy]=self.LTM_cache["Policy"][policy]["activation"]
-        
-        self.get_logger().info(f"SELECT_POLICY - All policy activations: {all_policy_activations}")
-        self.get_logger().info(f"SELECT_POLICY - Filtered policy activations (above threshold): {policy_activations}")
         self.get_logger().debug("Debug - All policy activations: " + str(all_policy_activations))
         self.get_logger().debug("Debug - Filtered policy activations: " + str(policy_activations))
-        
         if not policy_activations:
             policy_pool = all_policy_activations
-            self.get_logger().info("SELECT_POLICY - No policies above threshold, using all policies")
         else:
             policy_pool = policy_activations
-            self.get_logger().info(f"SELECT_POLICY - Using {len(policy_pool)} policies above threshold")
 
         if softmax:
             selected = self.select_policy_softmax(policy_pool, self.softmax_temperature)
-            self.get_logger().info(f"SELECT_POLICY - Softmax selected: {selected}")
         else: 
             selected= self.select_max_policy(policy_pool)
-            self.get_logger().info(f"SELECT_POLICY - Max selected: {selected}")
 
 
         self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
         self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
-        selected_activation = policy_pool.get(selected, None)
-        self.get_logger().info(f"SELECT_POLICY - Selected policy: {selected}, activation: {selected_activation}")
-        
-        if not selected_activation or selected_activation <= 0:
-            self.get_logger().warning(f"SELECT_POLICY - Selected policy has zero/invalid activation, selecting random policy")
+        selected_activation = policy_pool.get(selected, 0.0)
+        if selected_activation <= 0:
             selected = self.random_policy()
-            self.get_logger().info(f"SELECT_POLICY - Random policy selected: {selected}")
 
         self.get_logger().info(f"Selected policy => {selected} ({policy_pool.get(selected, 'N/A')})")
 
@@ -274,17 +257,8 @@ class MainLoop(CognitiveProcess):
         probabilities = exp_activations / numpy.sum(exp_activations)
         policy_probabilities = {policy: prob for policy, prob in zip(policy_names, probabilities)}
 
-        # Log detailed softmax info
-        max_policy = max(policy_activations.items(), key=lambda x: x[1])
-        self.get_logger().info(f"SOFTMAX - Temperature: {temperature}, Max activation policy: {max_policy[0]} ({max_policy[1]:.4f})")
-        
-        # Sort and show top 3 probabilities
-        sorted_probs = sorted(policy_probabilities.items(), key=lambda x: x[1], reverse=True)[:3]
-        self.get_logger().info(f"SOFTMAX - Top 3 probabilities: {[(p, f'{prob:.2%}') for p, prob in sorted_probs]}")
-
         # Select a policy based on the probabilities
         selected = self.rng.choice(policy_names, p=probabilities)
-        self.get_logger().info(f"SOFTMAX - Selected: {selected} (probability: {policy_probabilities[selected]:.2%})")
         self.get_logger().info(f"DEBUG - Softmax selection: {selected}, Probabilities: {policy_probabilities}")
         return selected
 
@@ -318,16 +292,9 @@ class MainLoop(CognitiveProcess):
 
         if policy:
             if policy in self.policies_to_test:
-                self.get_logger().warning(f"UPDATE_POLICIES_TO_TEST - Removing policy: {policy} (no sensorial change detected)")
-                self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - Before removal: {len(self.policies_to_test)} policies: {self.policies_to_test}")
                 self.policies_to_test.remove(policy)
-                self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - After removal: {len(self.policies_to_test)} policies: {self.policies_to_test}")
-            else:
-                self.get_logger().debug(f"UPDATE_POLICIES_TO_TEST - Policy {policy} not in list")
         else:
-            self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - Resetting policies_to_test (sensorial change detected or initialization)")
             self.policies_to_test = list(self.LTM_cache["Policy"].keys())
-            self.get_logger().info(f"UPDATE_POLICIES_TO_TEST - Reset complete: {len(self.policies_to_test)} policies: {self.policies_to_test}")
 
     # =========================
     # ACTIVATION HANDLING
@@ -437,7 +404,7 @@ class MainLoop(CognitiveProcess):
             if world_model_activation > threshold and goal_activation > threshold:
                 reward = reward_list.get(goal, 0.0)
                 if (reward > threshold):
-                    reward_list.pop(goal)
+                    reward_list.pop(goal, 0.0)
                     if not point_added:
                         self.add_point(pnode, old_perception)
                         updates = True
@@ -469,12 +436,18 @@ class MainLoop(CognitiveProcess):
             self.get_logger().info("No update required in PNode/CNodes")
 
     def add_point(self, name, sensing, node_type="pnode", confidence=1.0):
+        if not name:
+            self.get_logger().warning("add_point called with empty name, skipping...")
+            return False
         response = super().add_point(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = True
         return response
     
     def add_antipoint(self, name, sensing, node_type="pnode", confidence=1.0):
+        if not name:
+            self.get_logger().warning("add_antipoint called with empty name, skipping...")
+            return False
         """
         Adds an antipoint to the specified PNode.
 
