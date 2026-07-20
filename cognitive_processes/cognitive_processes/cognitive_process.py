@@ -511,9 +511,15 @@ class CognitiveProcess(Node):
 
         perception_msg = perception.to_msg()
         response = self.node_clients[service_name].send_request(points=perception_msg, confidences=[confidence])
-        self.get_logger().info(f"Added point in {node_type} {name}")
-        self.get_logger().debug(f"POINT: {str(perception)}")
-        return response.added
+        added = getattr(response, 'added', False)
+        if added:
+            self.get_logger().info(f"Added point in {node_type} {name}")
+            if node_type=="pnode":
+                self.pnodes_success[name] = True
+        else:
+            self.get_logger().warning(f"Failed to add point in {node_type} {name}")
+        self.get_logger().debug(f"POINT: {str(perception)} added={added}")
+        return added
 
     def add_antipoint(self, name, perception, node_type="pnode", confidence=1.0):
         """
@@ -537,9 +543,15 @@ class CognitiveProcess(Node):
 
         perception = perception.to_msg()
         response = self.node_clients[service_name].send_request(points=perception, confidences=[-1.0*confidence])
-        self.get_logger().info(f"Added anti-point in {node_type} {name}")
-        self.get_logger().debug(f"ANTI-POINT: {str(perception)}")
-        return response.added
+        added = getattr(response, 'added', False)
+        if added:
+            self.get_logger().info(f"Added anti-point in {node_type} {name}")
+            if node_type == "pnode":
+                self.pnodes_success[name] = False
+        else:
+            self.get_logger().warning(f"Failed to add anti-point in {node_type} {name}")
+        self.get_logger().debug(f"ANTIPOINT: {str(perception)} added={added}")
+        return added
 
     def new_cnode(self, perception, goal, policy):
         """
@@ -992,9 +1004,12 @@ class CognitiveProcess(Node):
             base_goal = goal.split("_dup_")[0]
         else:
             base_goal = goal
+
+        world_models = {cnode: [neighbor["name"] for neighbor in ltm_cache["CNode"][cnode]["neighbors"] if neighbor["node_type"] == "WorldModel"] for cnode in cnodes}
         
         for cnode in cnodes:
-            duplicate = [base_goal in neighbor["name"] for neighbor in ltm_cache["CNode"][cnode]["neighbors"] if neighbor["node_type"] == "Goal"]
+
+            duplicate = [base_goal in neighbor["name"] and self.current_world in world_models[cnode] for neighbor in ltm_cache["CNode"][cnode]["neighbors"] if neighbor["node_type"] == "Goal"]
             if any(duplicate):
                 self.get_logger().info(f"Duplicate of {base_goal} found in CNode {cnode}")
                 return True
@@ -1017,10 +1032,14 @@ class CognitiveProcess(Node):
         :rtype: cognitive_node_interfaces.srv.Pause.Response
         """
         self.paused = request.pause
+        self.stop = request.stop
         if self.paused:
             self.get_logger().info("Cognitive process paused.")
         else:
             self.get_logger().info("Cognitive process resumed.")
+        if self.stop:
+            self.get_logger().info("Cognitive process stopped.")
+            self.iterations = self.iteration # Store the current iteration count before stopping
         response.success = True
         return response
 

@@ -216,10 +216,11 @@ class MainLoop(CognitiveProcess):
         self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
         self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
-        if not policy_pool[selected]:
+        selected_activation = policy_pool.get(selected, 0.0)
+        if selected_activation <= 0:
             selected = self.random_policy()
 
-        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        self.get_logger().info(f"Selected policy => {selected} ({policy_pool.get(selected, 'N/A')})")
 
         return selected
     
@@ -370,31 +371,40 @@ class MainLoop(CognitiveProcess):
                     neighbor["name"]
                     for neighbor in cnode_neighbors
                     if neighbor["node_type"] == "WorldModel"
-                )
+                ), None
             )
             goal = next(
                 (
                     neighbor["name"]
                     for neighbor in cnode_neighbors
                     if neighbor["node_type"] == "Goal"
-                )
+                ), None
             )
             pnode = next(
                 (
                     neighbor["name"]
                     for neighbor in cnode_neighbors
                     if neighbor["node_type"] == "PNode"
-                )
+                ), None
             )
 
-            world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
-            goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
-            pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
+            if world_model:
+                world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
+            else:
+                world_model_activation = 1.0
+            if goal:
+                goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
+            else:
+                goal_activation = 1.0
+            if pnode:
+                pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
+            else:
+                pnode_activation = 1.0
 
             if world_model_activation > threshold and goal_activation > threshold:
                 reward = reward_list.get(goal, 0.0)
                 if (reward > threshold):
-                    reward_list.pop(goal)
+                    reward_list.pop(goal, 0.0)
                     if not point_added:
                         self.add_point(pnode, old_perception)
                         updates = True
@@ -426,12 +436,18 @@ class MainLoop(CognitiveProcess):
             self.get_logger().info("No update required in PNode/CNodes")
 
     def add_point(self, name, sensing, node_type="pnode", confidence=1.0):
+        if not name:
+            self.get_logger().warning("add_point called with empty name, skipping...")
+            return False
         response = super().add_point(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = True
         return response
     
     def add_antipoint(self, name, sensing, node_type="pnode", confidence=1.0):
+        if not name:
+            self.get_logger().warning("add_antipoint called with empty name, skipping...")
+            return False
         """
         Adds an antipoint to the specified PNode.
 
@@ -667,6 +683,7 @@ class MainLoopLight(MainLoop):
                 )
                 self.publish_iteration()
                 self.update_activations()
+                self.current_world = self.get_current_world_model()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, resulting_episode = self.execute_policy(self.current_episode.perception, self.current_policy)
