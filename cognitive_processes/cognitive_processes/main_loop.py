@@ -407,13 +407,17 @@ class MainLoop(CognitiveProcess):
                     reward_list.pop(goal, 0.0)
                     if not point_added:
                         self.add_point(pnode, old_perception)
+                        self.add_point(goal, perception, node_type="goal")
                         updates = True
                         point_added = True
                         if pnode_activation > threshold:
                             self.log_cnode_execution(cnode, True)
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, old_perception)
-                    if not point_added:
+                    if self.sensorial_changes(old_perception, perception): 
+                        self.add_antipoint(goal, perception, node_type="goal") # This is a HACK, needs to properly consider the difference in the old and new perception.
+                    if not point_added: # Removed this condition to log the execution of the CNode even if a point was already added for another goal. 
+                                        # This is because otherwise competence increases too fast compared to the confidence of the goal and P-Node spaces.
                         self.log_cnode_execution(cnode, False)
                     updates = True
 
@@ -523,6 +527,23 @@ class MainLoop(CognitiveProcess):
         return finished
 
     # =========================
+    # GOALS, REWARDS, NEEDS
+    # =========================
+    def update_rewards(self, old_perception, perception, ltm_cache, write_current_episode=True):
+        """
+        Update the rewards based on the old and new perceptions.
+
+        :param old_perception: The perception before the action.
+        :type old_perception: dict
+        :param perception: The perception after the action.
+        :type perception: dict
+        """
+        self.active_goals = self.get_goals(ltm_cache)
+        reward_list = self.get_goals_reward(old_perception, perception, ltm_cache)
+        if write_current_episode:
+            self.current_episode.update_reward(reward_list, self.get_clock().now())
+
+    # =========================
     # MAIN LOOP
     # =========================
     def run(self):
@@ -536,9 +557,7 @@ class MainLoop(CognitiveProcess):
         self.reset_world()
         self.current_episode.perception = self.read_perceptions()
         self.update_activations()
-        self.active_goals = self.get_goals(self.LTM_cache)
-        reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
-        self.current_episode.update_reward(reward_list, self.get_clock().now()) 
+        self.update_rewards(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
         
         while (self.iteration <= self.iterations) and (not self.stop):
@@ -565,18 +584,15 @@ class MainLoop(CognitiveProcess):
                 )
 
 
-                self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
-                reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
-                self.current_episode.update_reward(reward_list, self.get_clock().now())
-
+                self.update_rewards(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
                 self.publish_episode()
-
                 self.update_ltm(self.current_episode)
 
 
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
+                    self.update_rewards(self.current_episode.old_perception, reset_sensing, self.LTM_cache, write_current_episode=False)
                     self.current_episode.perception = reset_sensing
                     self.current_episode.ltm_state = self.LTM_cache
 
