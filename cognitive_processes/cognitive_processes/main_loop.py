@@ -141,8 +141,8 @@ class MainLoop(CognitiveProcess):
         """
 
         self.get_logger().info("Writing files publishing status...")
-        self.get_logger().debug(f"DEBUG: {self.pnodes_success}")
         for file in self.files:
+            self.get_logger().info(f"Writing file: {file.file_name}")
             if file.file_object is None:
                 file.write_header()
             file.write()
@@ -153,6 +153,7 @@ class MainLoop(CognitiveProcess):
         """
         self.get_logger().info("Closing files...")
         for file in self.files:
+            self.get_logger().info(f"Closing file: {file.file_name}")
             file.close()
     
     # =========================
