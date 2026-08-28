@@ -207,9 +207,6 @@ class CognitiveProcess(Node):
                 if ltm_dump[node_type].get(node, None) is None:
                     del self.LTM_cache[node_type][node]
                     self.delete_activation_input(node)
-
-        # Check if there are any drives not linked to goals
-        self.unlinked_drives = self.get_unlinked_drives()
     
     def ltm_change_callback(self, msg):
         """
@@ -634,12 +631,16 @@ class CognitiveProcess(Node):
         goal_name = f"goal_{self.n_goals}"
         goal_class = self.default_class.get("Goal")
         space_class = self.default_class.get("Space")
-        neighbors= [{"name": drive, "node_type": "Drive"}]
+        domain = self.get_current_world_model()
+        neighbor_dict = {drive: "Drive", domain: "WorldModel"}
+        neighbors = {
+            "neighbors": [{"name": node, "node_type": node_type} for node, node_type in neighbor_dict.items()]
+        }
         goal_params = self.default_params.get("Goal", {})
         if goal_params.get("space_class", None) is None and space_class is not None:
             goal_params["space_class"] = space_class
         parameters = {**goal_params,
-            "neighbors": neighbors,
+            **neighbors,
             "ltm_id": self.LTM_id,
         }
         goal = self.create_node_client(
@@ -874,6 +875,9 @@ class CognitiveProcess(Node):
                 rewards[goal] = reward.reward
                 updated_reward=reward.updated
 
+        # Check if there are any drives not linked to goals
+        self.unlinked_drives = self.get_unlinked_drives()
+
         #Add rewards obtained from unlinked drives
         if self.unlinked_drives:
             active_drives = [
@@ -903,7 +907,7 @@ class CognitiveProcess(Node):
         goals=self.LTM_cache.get("Goal", None)
         if drives:
             drives_list=list(drives.keys())
-            for goal in goals:
+            for goal in self.active_goals:
                 neighbors=goals[goal]["neighbors"]
                 for neighbor in neighbors:
                     if neighbor["name"] in drives_list:
