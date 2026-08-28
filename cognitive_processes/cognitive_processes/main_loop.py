@@ -408,17 +408,13 @@ class MainLoop(CognitiveProcess):
                     reward_list.pop(goal, 0.0)
                     if not point_added:
                         self.add_point(pnode, old_perception)
-                        self.add_point(goal, perception, node_type="goal")
                         updates = True
                         point_added = True
                         if pnode_activation > threshold:
                             self.log_cnode_execution(cnode, True)
                 elif pnode_activation > threshold:
                     self.add_antipoint(pnode, old_perception)
-                    if self.sensorial_changes(old_perception, perception): 
-                        self.add_antipoint(goal, perception, node_type="goal") # This is a HACK, needs to properly consider the difference in the old and new perception.
-                    if not point_added: # Removed this condition to log the execution of the CNode even if a point was already added for another goal. 
-                                        # This is because otherwise competence increases too fast compared to the confidence of the goal and P-Node spaces.
+                    if not point_added:
                         self.log_cnode_execution(cnode, False)
                     updates = True
 
@@ -429,6 +425,7 @@ class MainLoop(CognitiveProcess):
                     if not self.duplicate_connected(goal, cnodes, ltm_cache): # Filter out duplicates of the goal in the CNodes connected to the policy
                         if self.goal_has_cnode(goal, ltm_cache):
                             goal = self.duplicate_goal(goal, perception)
+                        self.add_point(goal, perception, node_type="goal")
                         self.new_cnode(old_perception, goal, policy)
                 else:
                     drive = goal
