@@ -537,7 +537,8 @@ class MainLoop(CognitiveProcess):
         :type perception: dict
         """
         self.active_goals = self.get_goals(ltm_cache)
-        reward_list = self.get_goals_reward(old_perception, perception, ltm_cache)
+        update_space = write_current_episode
+        reward_list = self.get_goals_reward(old_perception, perception, ltm_cache, update_space=update_space)
         if write_current_episode:
             self.current_episode.update_reward(reward_list, self.get_clock().now())
 

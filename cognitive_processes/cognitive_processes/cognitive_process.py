@@ -845,7 +845,7 @@ class CognitiveProcess(Node):
         goals = self.get_all_active_nodes("Goal", ltm_cache)
         return goals
     
-    def get_goals_reward(self, old_perception, perception, ltm_cache):
+    def get_goals_reward(self, old_perception, perception, ltm_cache, update_space = True):
         """
         This method retrieves the rewards for each active goal based on the old and current sensing.
 
@@ -870,7 +870,7 @@ class CognitiveProcess(Node):
                 if service_name not in self.node_clients:
                     self.node_clients[service_name] = ServiceClient(GetReward, service_name)
                 reward = self.node_clients[service_name].send_request(
-                    old_perception=old_perception_msg, perception=perception_msg
+                    old_perception=old_perception_msg, perception=perception_msg, update_space=update_space
                 )
                 rewards[goal] = reward.reward
                 updated_reward=reward.updated
@@ -890,7 +890,7 @@ class CognitiveProcess(Node):
                     service_name = "drive/" + str(drive) + "/get_reward"
                     if service_name not in self.node_clients:
                         self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                    reward = self.node_clients[service_name].send_request()
+                    reward = self.node_clients[service_name].send_request(update_space=update_space)
                     rewards[drive] = reward.reward
                     updated_reward=reward.updated
         self.get_logger().info(f"Reward_list: {rewards}")
