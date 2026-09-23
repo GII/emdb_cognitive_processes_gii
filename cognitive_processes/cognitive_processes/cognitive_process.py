@@ -15,7 +15,7 @@ from std_msgs.msg import String
 from core_interfaces.msg import Container as ContainerMsg
 from core_interfaces.srv import SetChangesTopic, GetNodeFromLTM, UpdateNeighbor, CreateNode
 from cognitive_node_interfaces.msg import Activation
-from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateGoal, LogExecution
+from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateNode, LogExecution
 from cognitive_processes_interfaces.srv import Pause
 
 class CognitiveProcess(Node):
@@ -652,22 +652,24 @@ class CognitiveProcess(Node):
             self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
         return goal_name
     
-    def duplicate_goal(self, goal_name, perception):
+    def duplicate_node(self, node_name, perception):
         """
-        This method duplicates a Goal node and adds a new point to it.
+        Duplicate a cognitive node and add a point to the duplicate.
 
-        :param goal_name: Name of the Goal node to be duplicated.
-        :type goal_name: str
+        :param node_name: Name of the node to be duplicated.
+        :type node_name: str
         :param perception: Perception to be added as a point in the duplicated Goal.
         :type perception: core.container.Container
         :return: Name of the duplicated Goal node.
         :rtype: str
         """
-        duplicate_service = f"goal/{goal_name}/duplicate_goal"
+        duplicate_service = f"cognitive_node/{node_name}/duplicate_node"
         if duplicate_service not in self.node_clients:
-            self.node_clients[duplicate_service] = ServiceClient(DuplicateGoal, duplicate_service)
-        response = self.node_clients[duplicate_service].send_request()
-        new_goal_name = response.duplicate_goal_name
+            self.node_clients[duplicate_service] = ServiceClient(DuplicateNode, duplicate_service)
+        response = self.node_clients[duplicate_service].send_request(
+            include_neighbors=True
+        )
+        new_goal_name = response.duplicate_node_name
         self.add_point(new_goal_name, perception, node_type="goal")
         return new_goal_name
 

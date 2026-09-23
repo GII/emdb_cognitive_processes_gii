@@ -424,7 +424,7 @@ class MainLoop(CognitiveProcess):
                 if goal not in self.unlinked_drives:
                     if not self.duplicate_connected(goal, cnodes, ltm_cache): # Filter out duplicates of the goal in the CNodes connected to the policy
                         if self.goal_has_cnode(goal, ltm_cache):
-                            goal = self.duplicate_goal(goal, perception)
+                            goal = self.duplicate_node(goal, perception)
                         self.add_point(goal, perception, node_type="goal")
                         self.new_cnode(old_perception, goal, policy)
                 else:
