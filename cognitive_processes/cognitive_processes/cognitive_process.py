@@ -87,9 +87,25 @@ class CognitiveProcess(Node):
             setattr(self, key, value)
 
     def start_threading(self):
+        """
+        Schedules the start of the process loop (run) in its own thread.
+
+        Processes call this method from their constructor, so the thread is not
+        started here but from a one-shot timer, once the node is spinning. This
+        way, subclasses finish their own initialization before run is called.
+        """
         self.loop_thread = threading.Thread(target=self.run, daemon=True)
         self.semaphore = threading.Semaphore()
-        self.loop_thread.start()
+        self.loop_start_timer = self.create_timer(0.0, self.start_loop_thread, callback_group=self.cbgroup_loop)
+
+    def start_loop_thread(self):
+        """
+        One-shot timer callback that starts the process loop thread.
+        """
+        self.loop_start_timer.cancel()
+        self.destroy_timer(self.loop_start_timer)
+        if self.loop_thread.ident is None:
+            self.loop_thread.start()
 
     def setup(self):
         """
