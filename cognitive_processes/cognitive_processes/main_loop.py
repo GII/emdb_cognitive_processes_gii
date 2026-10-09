@@ -493,8 +493,16 @@ class MainLoop(CognitiveProcess):
             pass
         if changed:
             if self.iteration>0:
-                iterations=self.iteration-self.last_reset
-                self.trials_data.append((self.iteration, self.goal_count, self.episode_count, finished))
+                iteration_span = self.iteration - self.last_reset
+                self.trials_data.append(
+                    (
+                        self.iteration,
+                        self.goal_count,
+                        iteration_span,
+                        self.episode_count,
+                        finished,
+                    )
+                )
                 self.episode_count=0
                 self.goal_count+=1
                 self.last_reset=self.iteration
