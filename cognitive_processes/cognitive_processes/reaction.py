@@ -85,29 +85,15 @@ class Reaction(CognitiveProcess):
     # Activation (avoid deadlock with parent policy node)
     # ------------------------------------------------------------------
 
-    def update_activations(self):
-        """Override to auto-set the parent policy node's activation flag.
+    def skipped_activation_inputs(self):
+        """Do not wait for the parent policy node's activation.
 
         The parent ``PolicyLearned`` node is blocked in ``execute_callback``
-        waiting for ``finished_flag``, so it cannot respond to activation
-        service calls.  We set its flag immediately (mirroring
-        ``Deliberation.update_activations``) to prevent a deadlock.
+        waiting for ``finished_flag``, so it cannot publish its activation
+        (mirroring ``Deliberation.skipped_activation_inputs``). Waiting for it
+        would be a deadlock.
         """
-        self.get_logger().info("Updating activations...")
-        self.semaphore.acquire()
-        self.activation_time = self.get_clock().now().nanoseconds
-        for node in self.activation_inputs:
-            self.activation_inputs[node]['flag'].clear()
-
-        for node in self.activation_inputs:
-            if node == self.node.name:
-                # Parent is blocked — set flag directly without a service call.
-                self.activation_inputs[node]['flag'].set()
-            self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
-            self.activation_inputs[node]['flag'].wait()
-            self.activation_inputs[node]['flag'].clear()
-        self.semaphore.release()
-        self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+        return {self.node.name}
 
     # ------------------------------------------------------------------
     # Goal discovery
