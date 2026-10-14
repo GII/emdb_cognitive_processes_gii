@@ -62,6 +62,9 @@ class MainLoop(CognitiveProcess):
 
         # --- File/output management ---
         self.files = []
+        # Files are written from the loop thread and from the episodes callback (executor thread)
+        self.files_lock = threading.Lock()
+        self.files_closed = False
         self.pnodes_success = {}
 
         # --- Experiment tracking ---
@@ -101,11 +104,13 @@ class MainLoop(CognitiveProcess):
     # =========================
 
     def receive_episode_callback(self, msg):
-       self.episode_count+=1
-       for file in self.files:
-            if file.file_object is None:
-                file.write_header()
-            file.write_episode(msg)
+        self.episode_count+=1
+        with self.files_lock:
+            if self.files_closed:
+                return
+            for file in self.files:
+                self.open_file(file)
+                file.write_episode(msg)
 
     # =========================
     # File Handling
@@ -141,20 +146,48 @@ class MainLoop(CognitiveProcess):
         """
 
         self.get_logger().info("Writing files publishing status...")
-        for file in self.files:
-            self.get_logger().info(f"Writing file: {file.file_name}")
-            if file.file_object is None:
-                file.write_header()
-            file.write()
+        with self.files_lock:
+            if self.files_closed:
+                return
+            for file in self.files:
+                self.get_logger().info(f"Writing file: {file.file_name}")
+                self.open_file(file)
+                file.write()
+
+    def open_file(self, file):
+        """
+        Opens a file (and writes its header) the first time it is used. It must be called with
+        files_lock held, so that a file is opened only once although two threads use it.
+
+        :param file: The file.
+        :type file: core.file.File
+        """
+        if file.file_object is None:
+            file.write_header()
 
     def close_files(self):
         """
-        Close all files when execution is finished.
+        Close all files when execution is finished. Files are closed only once.
         """
-        self.get_logger().info("Closing files...")
-        for file in self.files:
-            self.get_logger().info(f"Closing file: {file.file_name}")
-            file.close()
+        with self.files_lock:
+            if self.files_closed:
+                return
+            self.files_closed = True
+            self.get_logger().info("Closing files...")
+            for file in self.files:
+                self.get_logger().info(f"Closing file: {file.file_name}")
+                file.close()
+
+    def destroy_node(self):
+        """
+        Stops the loop and closes the files before destroying the node. Execution nodes destroy
+        their nodes when they shut down, also when the process receives SIGTERM (e.g. from the
+        commander at the end of the experiment) or SIGINT, so the files are always closed. Some of
+        them are only written when they are closed (e.g. the episodes dataset).
+        """
+        self.stop = True
+        self.close_files()
+        return super().destroy_node()
     
     # =========================
     # PUBLISHING & STATUS
