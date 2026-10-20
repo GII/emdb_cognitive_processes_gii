@@ -74,9 +74,8 @@ class MainLoop(CognitiveProcess):
         self.last_reset = 0
         self.kill_on_finish = kill_on_finish
 
-        # Read LTM and configure perceptions
+        # Read LTM and configure perceptions (setup) in the process thread
         self.set_attributes_from_params(params)
-        self.setup()
         self.start_threading()
 
 
@@ -89,8 +88,9 @@ class MainLoop(CognitiveProcess):
         Initial configuration of the MainLoop node.
         This method sets up the LTM, perceptions, files, connectors, control channel, etc.
         """
-        super().setup()
+        # The files go first: the episode subscription created by the base setup writes to them
         self.setup_files()
+        super().setup()
         self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
 
     def setup_control_channel(self):

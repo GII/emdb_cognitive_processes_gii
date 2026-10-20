@@ -35,9 +35,8 @@ class Deliberation(CognitiveProcess):
         self.reward_threshold = 0.1
         self.current_reward = 0.0
         
-        # Read LTM and configure perceptions
+        # Read LTM and configure perceptions (setup) in the process thread
         self.set_attributes_from_params(params)
-        self.setup()
         self.start_threading()
 
     def setup(self):

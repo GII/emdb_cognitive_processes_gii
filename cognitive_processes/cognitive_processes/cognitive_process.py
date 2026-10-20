@@ -1,5 +1,6 @@
 import threading
 import time
+import traceback
 import numpy as np
 import yaml
 
@@ -37,6 +38,7 @@ class CognitiveProcess(Node):
         self.period = 1
         self.paused = False
         self.stop = False
+        self.ready = threading.Event()  # Set when setup has finished
 
         # --- LTM and STM ---
         self.current_episode = Episode()
@@ -96,13 +98,14 @@ class CognitiveProcess(Node):
 
     def start_threading(self):
         """
-        Schedules the start of the process loop (run) in its own thread.
+        Schedules the start of the process (setup and run) in its own thread.
 
         Processes call this method from their constructor, so the thread is not
         started here but from a one-shot timer, once the node is spinning. This
-        way, subclasses finish their own initialization before run is called.
+        way, subclasses finish their own initialization before setup is called,
+        and the service calls of setup are made with the node already spinning.
         """
-        self.loop_thread = threading.Thread(target=self.run, daemon=True)
+        self.loop_thread = threading.Thread(target=self.process_thread, daemon=True)
         self.loop_start_timer = self.create_timer(0.0, self.start_loop_thread, callback_group=self.cbgroup_loop)
 
     def start_loop_thread(self):
@@ -113,6 +116,28 @@ class CognitiveProcess(Node):
         self.destroy_timer(self.loop_start_timer)
         if self.loop_thread.ident is None:
             self.loop_thread.start()
+
+    def process_thread(self):
+        """
+        Body of the process thread: configures the process (setup), signals that it
+        is ready and runs its loop (run).
+        """
+        try:
+            self.setup()
+        except Exception:
+            self.get_logger().fatal(f"Setup of {self.name} failed, the process will not run:\n{traceback.format_exc()}")
+            raise
+        self.ready.set()
+        self.run()
+
+    def wait_ready(self):
+        """
+        Waits until the setup of the process has finished. Nodes that use the process
+        from their callbacks call it first. While waiting, it periodically logs a warning.
+        """
+        start = time.monotonic()
+        while not self.ready.wait(timeout=self.activation_warning_period):
+            self.get_logger().warning(f"Waiting for the setup of {self.name} for {time.monotonic() - start:.1f} s")
 
     def setup(self):
         """
