@@ -39,6 +39,8 @@ class CognitiveProcess(Node):
         self.paused = False
         self.stop = False
         self.ready = threading.Event()  # Set when setup has finished
+        self.ready_lock = threading.Lock()  # Protects ready_callbacks and the change of ready
+        self.ready_callbacks = []  # (node, callback) pairs to schedule when the process is ready (see call_when_ready)
 
         # --- LTM and STM ---
         self.current_episode = Episode()
@@ -127,17 +129,30 @@ class CognitiveProcess(Node):
         except Exception:
             self.get_logger().fatal(f"Setup of {self.name} failed, the process will not run:\n{traceback.format_exc()}")
             raise
-        self.ready.set()
+        with self.ready_lock:
+            self.ready.set()
+            ready_callbacks, self.ready_callbacks = self.ready_callbacks, []
+        for node, callback in ready_callbacks:
+            node.executor.create_task(callback)
         self.run()
 
-    def wait_ready(self):
+    def call_when_ready(self, node, callback):
         """
-        Waits until the setup of the process has finished. Nodes that use the process
-        from their callbacks call it first. While waiting, it periodically logs a warning.
+        Schedules a callback in the executor of a node once the setup of the process
+        has finished, or right away if it already has. Neither the caller nor the
+        callback wait, so nodes can use it from their callbacks.
+
+        :param node: Node whose executor runs the callback. It must already be spinning in
+            an executor, so call this method from one of its callbacks.
+        :type node: rclpy.node.Node
+        :param callback: Function without arguments.
+        :type callback: callable
         """
-        start = time.monotonic()
-        while not self.ready.wait(timeout=self.activation_warning_period):
-            self.get_logger().warning(f"Waiting for the setup of {self.name} for {time.monotonic() - start:.1f} s")
+        with self.ready_lock:
+            if not self.ready.is_set():
+                self.ready_callbacks.append((node, callback))
+                return
+        node.executor.create_task(callback)
 
     def setup(self):
         """
