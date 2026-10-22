@@ -100,8 +100,6 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
             {}
         )  # Keys are service name, values are service client object
 
-        self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
-
         self.pause_service = self.create_service(Pause, f"{self.name}/pause", self.pause_callback, callback_group=self.cbgroup_server)
 
 
@@ -180,6 +178,8 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         self.setup_ltm_suscription()
         self.setup_connectors()
         self.setup_control_channel()
+        # Created here, in the process thread: the constructor runs in an executor callback, where it must not wait for the service
+        self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
         self.LTM_changes_client.send_request(changes_topic=True)
 
     def setup_ltm_suscription(self):
