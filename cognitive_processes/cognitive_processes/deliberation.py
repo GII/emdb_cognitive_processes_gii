@@ -64,28 +64,12 @@ class Deliberation(CognitiveProcess):
             )
         self.action_sampler = LatinHypercube(d=self.actuation_dims, rng=self.rng)
 
-    def update_activations(self):
-            """
-            This method updates the activations of the nodes in the LTM cache.
-            """
-
-            self.get_logger().info("Updating activations...")
-            self.semaphore.acquire()
-            self.activation_time=self.get_clock().now().nanoseconds
-            for node in self.activation_inputs:
-                self.activation_inputs[node]['flag'].clear()
-
-            for node in self.activation_inputs:
-                if node == self.node.name:
-                    self.activation_inputs[node]['flag'].set() # Filter the activation of the parent node to avoid deadlocks
-                self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
-                if not self.activation_inputs[node]['flag'].wait(timeout=5.0):
-                    self.get_logger().warning(f"Timeout waiting for activation of node {node}")
-                    self.activation_logs = True
-                    self.activation_inputs[node]['flag'].wait()
-                self.activation_inputs[node]['flag'].clear()
-            self.semaphore.release()
-            self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+    def skipped_activation_inputs(self):
+        """
+        The parent node does not publish its activation while the process runs, so its
+        activation is not waited for (it would be a deadlock).
+        """
+        return {self.node.name}
 
     def generate_candidate_actions(self, states: Container = None, algorithm = "latin") -> Episode:
         """

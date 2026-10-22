@@ -1,4 +1,5 @@
 import threading
+import time
 import numpy as np
 import yaml
 
@@ -15,7 +16,7 @@ from std_msgs.msg import String
 from core_interfaces.msg import Container as ContainerMsg
 from core_interfaces.srv import SetChangesTopic, GetNodeFromLTM, UpdateNeighbor, CreateNode
 from cognitive_node_interfaces.msg import Activation
-from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateGoal, LogExecution
+from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateNode, LogExecution
 from cognitive_processes_interfaces.srv import Pause
 
 class CognitiveProcess(Node):
@@ -62,6 +63,13 @@ class CognitiveProcess(Node):
         self.activation_time = 0
         self.activation_threshold = 0.01
         self.activation_logs = False
+        self.activation_warning_period = 5.0  # Seconds between warnings while waiting for activations
+
+        # --- Synchronization between the loop thread and the executor callbacks ---
+        # Protects LTM_cache, activation_inputs and pending_ltm_dump. It is held only for short
+        # operations, never while waiting, so the executor callbacks never block for long.
+        self.activation_condition = threading.Condition()
+        self.pending_ltm_dump = None  # Latest LTM dump received and not applied yet
 
         # --- Callback groups and service clients ---
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
@@ -87,9 +95,24 @@ class CognitiveProcess(Node):
             setattr(self, key, value)
 
     def start_threading(self):
+        """
+        Schedules the start of the process loop (run) in its own thread.
+
+        Processes call this method from their constructor, so the thread is not
+        started here but from a one-shot timer, once the node is spinning. This
+        way, subclasses finish their own initialization before run is called.
+        """
         self.loop_thread = threading.Thread(target=self.run, daemon=True)
-        self.semaphore = threading.Semaphore()
-        self.loop_thread.start()
+        self.loop_start_timer = self.create_timer(0.0, self.start_loop_thread, callback_group=self.cbgroup_loop)
+
+    def start_loop_thread(self):
+        """
+        One-shot timer callback that starts the process loop thread.
+        """
+        self.loop_start_timer.cancel()
+        self.destroy_timer(self.loop_start_timer)
+        if self.loop_thread.ident is None:
+            self.loop_thread.start()
 
     def setup(self):
         """
@@ -187,42 +210,59 @@ class CognitiveProcess(Node):
             ltm_dump = self.request_ltm()
             self.get_logger().debug(f"LTM Dump: {str(ltm_dump)}")
         
-        #Add missing elements from LTM to LTM Cache
-        for node_type in ltm_dump.keys():
-            if self.LTM_cache.get(node_type, None) is None:
-                self.LTM_cache[node_type] = {}
-            for node in ltm_dump[node_type].keys():
-                if self.LTM_cache[node_type].get(node, None) is None:
-                    self.LTM_cache[node_type][node] = dict(activation = 0.0, activation_timestamp = 0, neighbors = ltm_dump[node_type][node]["neighbors"])
-                    self.create_activation_input(node, node_type)
-                else: #If node exists update data (except activations)
-                    node_data = ltm_dump[node_type][node]
-                    del node_data["activation"]
-                    del node_data["activation_timestamp"]
-                    self.LTM_cache[node_type][node].update(node_data) 
-        
-        #Remove elements in LTM Cache that were removed from LTM.
-        for node_type in self.LTM_cache.keys():
-            for node in self.LTM_cache[node_type]:
-                if ltm_dump[node_type].get(node, None) is None:
-                    del self.LTM_cache[node_type][node]
-                    self.delete_activation_input(node)
+        with self.activation_condition:
+            #Add missing elements from LTM to LTM Cache
+            for node_type in ltm_dump.keys():
+                if self.LTM_cache.get(node_type, None) is None:
+                    self.LTM_cache[node_type] = {}
+                for node in ltm_dump[node_type].keys():
+                    if self.LTM_cache[node_type].get(node, None) is None:
+                        self.LTM_cache[node_type][node] = dict(activation = 0.0, activation_timestamp = 0, neighbors = ltm_dump[node_type][node]["neighbors"])
+                        self.create_activation_input(node, node_type)
+                    else: #If node exists update data (except activations)
+                        node_data = ltm_dump[node_type][node]
+                        del node_data["activation"]
+                        del node_data["activation_timestamp"]
+                        self.LTM_cache[node_type][node].update(node_data) 
+            
+            #Remove elements in LTM Cache that were removed from LTM.
+            for node_type in self.LTM_cache.keys():
+                for node in list(self.LTM_cache[node_type]):
+                    if ltm_dump.get(node_type, {}).get(node, None) is None:
+                        del self.LTM_cache[node_type][node]
+                        self.delete_activation_input(node)
     
     def ltm_change_callback(self, msg):
         """
-        Read changes made in the LTM
-        external to the cognitive process and update the LTM and perception
-        caches accordingly.
+        Receives a change made in the LTM external to the cognitive process.
+
+        The LTM dump is not applied here but stored, and the loop thread applies it
+        (see apply_ltm_changes). This callback must not wait for the loop thread: the loop
+        thread waits for activations that are received by callbacks of the same executor,
+        which may have a single thread.
 
         :param msg: Message containing the LTM dump.
         :type msg: std_msgs.msg.String
         """
-        self.semaphore.acquire()
-        self.get_logger().info("Processing change from LTM...")
+        self.get_logger().info("Received change from LTM...")
         ltm_dump = yaml.safe_load(msg.data)
-        self.read_ltm(ltm_dump=ltm_dump)
-        #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
-        self.semaphore.release()
+        with self.activation_condition:
+            # Each message contains the whole LTM, so only the latest one is needed
+            self.pending_ltm_dump = ltm_dump
+            self.activation_condition.notify_all()
+
+    def apply_ltm_changes(self):
+        """
+        Applies the latest LTM dump received, if any, to the LTM and activation input caches.
+        It must be called from the loop thread.
+        """
+        with self.activation_condition:
+            ltm_dump = self.pending_ltm_dump
+            self.pending_ltm_dump = None
+            if ltm_dump is not None:
+                self.get_logger().info("Processing change from LTM...")
+                self.read_ltm(ltm_dump=ltm_dump)
+                #self.configure_perceptions #CHANGE THIS SO THAT NEW PERCEPTIONS ARE ADDED AND OLD PERCEPTIONS ARE DELETED
 
     def request_ltm(self):
         """
@@ -385,27 +425,93 @@ class CognitiveProcess(Node):
     # ACTIVATION HANDLING
     # =========================
 
-    def update_activations(self):
+    def update_activations(self, timeout=None):
         """
         This method updates the activations of the nodes in the LTM cache.
+
+        It waits until every node in the activation inputs has published an activation
+        computed after this method was called. LTM changes received meanwhile are applied
+        while waiting: the method stops waiting for deleted nodes and starts waiting for
+        new ones. While it waits, it periodically logs a warning with the pending nodes.
+
+        :param timeout: Maximum time to wait in seconds. None (default) waits without limit.
+        :type timeout: float
+        :return: True if all the activations were received, False if the timeout expired.
+        :rtype: bool
         """
 
         self.get_logger().info("Updating activations...")
-        self.semaphore.acquire()
-        self.activation_time=self.get_clock().now().nanoseconds
-        for node in self.activation_inputs:
-            self.activation_inputs[node]['flag'].clear()
+        start = time.monotonic()
+        next_warning = start + self.activation_warning_period
+        with self.activation_condition:
+            self.activation_time=self.get_clock().now().nanoseconds
+            for node in self.activation_inputs:
+                self.activation_inputs[node]['updated'] = False
 
-        for node in self.activation_inputs:
-            self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
-            if not self.activation_inputs[node]['flag'].wait(timeout=5.0):
-                self.get_logger().warning(f"Timeout waiting for activation of node {node}")
-                self.activation_logs = True
-                self.activation_inputs[node]['flag'].wait()
-            self.activation_inputs[node]['flag'].clear()
+            while True:
+                self.apply_ltm_changes()
+                pending = self.pending_activations()
+                if not pending:
+                    break
+                now = time.monotonic()
+                if timeout is not None and now - start >= timeout:
+                    self.log_pending_activations(pending, now - start, timeout=True)
+                    self.activation_logs = False
+                    return False
+                if now >= next_warning:
+                    self.log_pending_activations(pending, now - start)
+                    self.activation_logs = True
+                    next_warning += self.activation_warning_period
+                deadline = next_warning if timeout is None else min(next_warning, start + timeout)
+                # Releases the lock while waiting, so the executor callbacks can run
+                self.activation_condition.wait(timeout=deadline - now)
         self.activation_logs = False
-        self.semaphore.release()
         self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+        return True
+
+    def pending_activations(self):
+        """
+        Returns the nodes whose activation update_activations is still waiting for.
+
+        :return: Names of the pending nodes.
+        :rtype: list
+        """
+        skipped = self.skipped_activation_inputs()
+        return [node for node, data in self.activation_inputs.items() if not data['updated'] and node not in skipped]
+
+    def skipped_activation_inputs(self):
+        """
+        Returns the nodes whose activation update_activations does not wait for.
+        Subclasses override it, for instance, for nodes that cannot publish their activation
+        while the process runs.
+
+        :return: Names of the nodes.
+        :rtype: set
+        """
+        return set()
+
+    def log_pending_activations(self, pending, waited, timeout=False):
+        """
+        Logs the nodes whose activation update_activations is still waiting for.
+
+        :param pending: Names of the pending nodes.
+        :type pending: list
+        :param waited: Time waited in seconds.
+        :type waited: float
+        :param timeout: The wait was abandoned because the timeout expired.
+        :type timeout: bool
+        """
+        details = []
+        for node in pending:
+            node_type = self.activation_inputs[node]['node_type']
+            timestamp = self.LTM_cache.get(node_type, {}).get(node, {}).get('activation_timestamp', 0)
+            age = (self.activation_time - timestamp) / 1e9 if timestamp else None
+            last = f"last activation {age:.3f} s before the wait" if age is not None else "no activation received"
+            details.append(f"{node_type} {node} ({last})")
+        message = f"Waiting for the activation of {len(pending)} node(s) for {waited:.1f} s: " + "; ".join(details)
+        if timeout:
+            message = "Activation timeout. " + message
+        self.get_logger().warning(message)
 
     def request_activation(self, name, perception):
         """
@@ -437,8 +543,7 @@ class CognitiveProcess(Node):
         """
         if name not in self.activation_inputs:
             subscriber=self.create_subscription(Activation, 'cognitive_node/' + str(name) + '/activation', self.read_activation_callback, 1, callback_group=self.cbgroup_server)
-            flag=threading.Event()
-            self.activation_inputs[name]=dict(node_type=node_type, subscriber=subscriber, flag=flag)
+            self.activation_inputs[name]=dict(node_type=node_type, subscriber=subscriber, updated=False)
             self.get_logger().debug(f'Created new activation input: {name} of type {node_type}')
         else:
             self.get_logger().error(f'Tried to add {name} to activation inputs more than once')
@@ -451,7 +556,7 @@ class CognitiveProcess(Node):
         :type name: str
         """
         if name in self.activation_inputs:
-            self.destroy_subscription(self.activation_inputs[name])
+            self.destroy_subscription(self.activation_inputs[name]['subscriber'])
             self.activation_inputs.pop(name)
 
     def read_activation_callback(self, msg: Activation):
@@ -466,17 +571,24 @@ class CognitiveProcess(Node):
         node_type=msg.node_type
         activation=msg.activation
         timestamp=Time.from_msg(msg.timestamp).nanoseconds
-        old_timestamp=self.LTM_cache[node_type][node_name]['activation_timestamp']
-        self.LTM_cache[node_type][node_name]['activation']=activation
-        self.LTM_cache[node_type][node_name]['activation_timestamp']=timestamp
+        with self.activation_condition:
+            node_data = self.LTM_cache.get(node_type, {}).get(node_name, None)
+            activation_input = self.activation_inputs.get(node_name, None)
+            if node_data is None or activation_input is None:
+                # The node was removed from the LTM, or it is not in the cache yet
+                return
+            old_timestamp=node_data['activation_timestamp']
+            node_data['activation']=activation
+            node_data['activation_timestamp']=timestamp
 
-        if self.activation_logs:
-            self.get_logger().debug(f'Activation received: {node_type} {node_name} - Activation: {activation} - Timestamp: {timestamp} / Activation Time: {self.activation_time}')
-        
-        if timestamp > self.activation_time :            
-            self.activation_inputs[node_name]['flag'].set()
-        elif timestamp < old_timestamp:
-            self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
+            if self.activation_logs:
+                self.get_logger().debug(f'Activation received: {node_type} {node_name} - Activation: {activation} - Timestamp: {timestamp} / Activation Time: {self.activation_time}')
+            
+            if timestamp > self.activation_time :            
+                activation_input['updated']=True
+                self.activation_condition.notify_all()
+            elif timestamp < old_timestamp:
+                self.get_logger().error(f"JUMP BACK IN TIME DETECTED. ACTIVATION OF {node_type} {node_name}")
         
 
     # =========================
@@ -652,22 +764,24 @@ class CognitiveProcess(Node):
             self.get_logger().fatal(f"Failed creation of Goal {goal_name}")
         return goal_name
     
-    def duplicate_goal(self, goal_name, perception):
+    def duplicate_node(self, node_name, perception):
         """
-        This method duplicates a Goal node and adds a new point to it.
+        Duplicate a cognitive node and add a point to the duplicate.
 
-        :param goal_name: Name of the Goal node to be duplicated.
-        :type goal_name: str
+        :param node_name: Name of the node to be duplicated.
+        :type node_name: str
         :param perception: Perception to be added as a point in the duplicated Goal.
         :type perception: core.container.Container
         :return: Name of the duplicated Goal node.
         :rtype: str
         """
-        duplicate_service = f"goal/{goal_name}/duplicate_goal"
+        duplicate_service = f"cognitive_node/{node_name}/duplicate_node"
         if duplicate_service not in self.node_clients:
-            self.node_clients[duplicate_service] = ServiceClient(DuplicateGoal, duplicate_service)
-        response = self.node_clients[duplicate_service].send_request()
-        new_goal_name = response.duplicate_goal_name
+            self.node_clients[duplicate_service] = ServiceClient(DuplicateNode, duplicate_service)
+        response = self.node_clients[duplicate_service].send_request(
+            include_neighbors=True
+        )
+        new_goal_name = response.duplicate_node_name
         self.add_point(new_goal_name, perception, node_type="goal")
         return new_goal_name
 
