@@ -74,9 +74,8 @@ class MainLoop(CognitiveProcess):
         self.last_reset = 0
         self.kill_on_finish = kill_on_finish
 
-        # Read LTM and configure perceptions (setup) in the process thread
+        # The process thread (setup and run) starts after the constructor
         self.set_attributes_from_params(params)
-        self.start_threading()
 
 
     # =========================

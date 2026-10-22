@@ -20,9 +20,25 @@ from cognitive_node_interfaces.msg import Activation
 from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateNode, LogExecution
 from cognitive_processes_interfaces.srv import Pause
 
-class CognitiveProcess(Node):
+class StartsAfterConstruction(type):
+    """
+    Metaclass of the cognitive processes: starts the process thread once the object
+    has been fully constructed, that is, after the constructor of the class being
+    instantiated, whatever its depth in the hierarchy. Subclasses inherit it, so
+    they don't have to start the thread themselves.
+    """
+    def __call__(cls, *args, **kwargs):
+        process = super().__call__(*args, **kwargs)  # Runs the whole chain of constructors
+        process.start_process_thread()
+        return process
+
+
+class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
     """
     CognitiveProcess class, base class for cognitive processes in the architecture.
+
+    The process runs in its own thread (setup, then run), which starts automatically
+    once the object has been fully constructed (see StartsAfterConstruction).
     """
     def __init__(self, name, iterations = 0, trials = 1, LTM_id="", **params):
         """
@@ -41,6 +57,7 @@ class CognitiveProcess(Node):
         self.ready = threading.Event()  # Set when setup has finished
         self.ready_lock = threading.Lock()  # Protects ready_callbacks and the change of ready
         self.ready_callbacks = []  # (node, callback) pairs to schedule when the process is ready (see call_when_ready)
+        self.loop_thread = None  # Process thread, started after the constructor (see StartsAfterConstruction)
 
         # --- LTM and STM ---
         self.current_episode = Episode()
@@ -79,7 +96,6 @@ class CognitiveProcess(Node):
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
         self.cbgroup_server = MutuallyExclusiveCallbackGroup()
         self.cbgroup_client = MutuallyExclusiveCallbackGroup()
-        self.cbgroup_loop = MutuallyExclusiveCallbackGroup()
         self.node_clients = (
             {}
         )  # Keys are service name, values are service client object
@@ -98,26 +114,23 @@ class CognitiveProcess(Node):
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
             setattr(self, key, value)
 
+    def start_process_thread(self):
+        """
+        Starts the process (setup and run) in its own thread. The metaclass calls it
+        once the object has been fully constructed. Further calls do nothing.
+        """
+        if self.loop_thread is not None:
+            return
+        self.loop_thread = threading.Thread(target=self.process_thread, daemon=True)
+        self.loop_thread.start()
+
     def start_threading(self):
         """
-        Schedules the start of the process (setup and run) in its own thread.
-
-        Processes call this method from their constructor, so the thread is not
-        started here but from a one-shot timer, once the node is spinning. This
-        way, subclasses finish their own initialization before setup is called,
-        and the service calls of setup are made with the node already spinning.
+        No longer needed: the process thread starts automatically once the object has
+        been fully constructed. Kept so that processes that still call it from their
+        constructor don't start the thread too early. It only logs a warning.
         """
-        self.loop_thread = threading.Thread(target=self.process_thread, daemon=True)
-        self.loop_start_timer = self.create_timer(0.0, self.start_loop_thread, callback_group=self.cbgroup_loop)
-
-    def start_loop_thread(self):
-        """
-        One-shot timer callback that starts the process loop thread.
-        """
-        self.loop_start_timer.cancel()
-        self.destroy_timer(self.loop_start_timer)
-        if self.loop_thread.ident is None:
-            self.loop_thread.start()
+        self.get_logger().warning(f"{type(self).__name__} calls start_threading(), which is no longer needed: the process thread starts automatically after the constructor")
 
     def process_thread(self):
         """
