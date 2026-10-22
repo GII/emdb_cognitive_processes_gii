@@ -8,6 +8,7 @@ import threading
 import numpy
 import time
 from copy import copy, deepcopy
+from collections import deque
 
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
@@ -62,9 +63,13 @@ class MainLoop(CognitiveProcess):
 
         # --- File/output management ---
         self.files = []
-        # Files are written from the loop thread and from the episodes callback (executor thread)
+        # Only the loop thread writes the files. The episodes callback just queues the episodes, which
+        # the loop thread writes in update_status and close_files. files_lock is only shared with
+        # destroy_node, which closes the files when the execution node shuts down; no callback takes it,
+        # so the loop thread can hold it while the files wait for service responses.
         self.files_lock = threading.Lock()
         self.files_closed = False
+        self.pending_episodes = deque()  # Episodes received and not written yet (deque: thread safe appends and pops)
         self.pnodes_success = {}
 
         # --- Experiment tracking ---
@@ -103,13 +108,12 @@ class MainLoop(CognitiveProcess):
     # =========================
 
     def receive_episode_callback(self, msg):
+        """
+        Queues a received episode. The loop thread writes it to the files (see write_pending_episodes),
+        so this callback never waits for the files.
+        """
         self.episode_count+=1
-        with self.files_lock:
-            if self.files_closed:
-                return
-            for file in self.files:
-                self.open_file(file)
-                file.write_episode(msg)
+        self.pending_episodes.append(msg)
 
     # =========================
     # File Handling
@@ -148,15 +152,27 @@ class MainLoop(CognitiveProcess):
         with self.files_lock:
             if self.files_closed:
                 return
+            self.write_pending_episodes()
             for file in self.files:
                 self.get_logger().info(f"Writing file: {file.file_name}")
                 self.open_file(file)
                 file.write()
 
+    def write_pending_episodes(self):
+        """
+        Writes the queued episodes to the files, in the order they were received. It must be called
+        with files_lock held.
+        """
+        while self.pending_episodes:
+            msg = self.pending_episodes.popleft()
+            for file in self.files:
+                self.open_file(file)
+                file.write_episode(msg)
+
     def open_file(self, file):
         """
         Opens a file (and writes its header) the first time it is used. It must be called with
-        files_lock held, so that a file is opened only once although two threads use it.
+        files_lock held.
 
         :param file: The file.
         :type file: core.file.File
@@ -166,11 +182,13 @@ class MainLoop(CognitiveProcess):
 
     def close_files(self):
         """
-        Close all files when execution is finished. Files are closed only once.
+        Close all files when execution is finished, after writing the queued episodes. Files are
+        closed only once.
         """
         with self.files_lock:
             if self.files_closed:
                 return
+            self.write_pending_episodes()
             self.files_closed = True
             self.get_logger().info("Closing files...")
             for file in self.files:
@@ -183,6 +201,10 @@ class MainLoop(CognitiveProcess):
         their nodes when they shut down, also when the process receives SIGTERM (e.g. from the
         commander at the end of the experiment) or SIGINT, so the files are always closed. Some of
         them are only written when they are closed (e.g. the episodes dataset).
+
+        Then it runs after the executor has stopped, not in a callback. If the loop thread is writing
+        the files, it waits until it finishes. A node deleted through the delete service of its
+        execution node is destroyed in a callback, so that wait would block the executor.
         """
         self.stop = True
         self.close_files()
