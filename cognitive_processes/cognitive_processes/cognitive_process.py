@@ -1,5 +1,6 @@
 import threading
 import time
+import traceback
 import numpy as np
 import yaml
 
@@ -19,9 +20,25 @@ from cognitive_node_interfaces.msg import Activation
 from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateNode, LogExecution
 from cognitive_processes_interfaces.srv import Pause
 
-class CognitiveProcess(Node):
+class StartsAfterConstruction(type):
+    """
+    Metaclass of the cognitive processes: starts the process thread once the object
+    has been fully constructed, that is, after the constructor of the class being
+    instantiated, whatever its depth in the hierarchy. Subclasses inherit it, so
+    they don't have to start the thread themselves.
+    """
+    def __call__(cls, *args, **kwargs):
+        process = super().__call__(*args, **kwargs)  # Runs the whole chain of constructors
+        process.start_process_thread()
+        return process
+
+
+class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
     """
     CognitiveProcess class, base class for cognitive processes in the architecture.
+
+    The process runs in its own thread (setup, then run), which starts automatically
+    once the object has been fully constructed (see StartsAfterConstruction).
     """
     def __init__(self, name, iterations = 0, trials = 1, LTM_id="", **params):
         """
@@ -37,6 +54,10 @@ class CognitiveProcess(Node):
         self.period = 1
         self.paused = False
         self.stop = False
+        self.ready = threading.Event()  # Set when setup has finished
+        self.ready_lock = threading.Lock()  # Protects ready_callbacks and the change of ready
+        self.ready_callbacks = []  # (node, callback) pairs to schedule when the process is ready (see call_when_ready)
+        self.loop_thread = None  # Process thread, started after the constructor (see StartsAfterConstruction)
 
         # --- LTM and STM ---
         self.current_episode = Episode()
@@ -75,12 +96,9 @@ class CognitiveProcess(Node):
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
         self.cbgroup_server = MutuallyExclusiveCallbackGroup()
         self.cbgroup_client = MutuallyExclusiveCallbackGroup()
-        self.cbgroup_loop = MutuallyExclusiveCallbackGroup()
         self.node_clients = (
             {}
         )  # Keys are service name, values are service client object
-
-        self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
 
         self.pause_service = self.create_service(Pause, f"{self.name}/pause", self.pause_callback, callback_group=self.cbgroup_server)
 
@@ -94,25 +112,58 @@ class CognitiveProcess(Node):
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
             setattr(self, key, value)
 
+    def start_process_thread(self):
+        """
+        Starts the process (setup and run) in its own thread. The metaclass calls it
+        once the object has been fully constructed. Further calls do nothing.
+        """
+        if self.loop_thread is not None:
+            return
+        self.loop_thread = threading.Thread(target=self.process_thread, daemon=True)
+        self.loop_thread.start()
+
     def start_threading(self):
         """
-        Schedules the start of the process loop (run) in its own thread.
+        No longer needed: the process thread starts automatically once the object has
+        been fully constructed. Kept so that processes that still call it from their
+        constructor don't start the thread too early. It only logs a warning.
+        """
+        self.get_logger().warning(f"{type(self).__name__} calls start_threading(), which is no longer needed: the process thread starts automatically after the constructor")
 
-        Processes call this method from their constructor, so the thread is not
-        started here but from a one-shot timer, once the node is spinning. This
-        way, subclasses finish their own initialization before run is called.
+    def process_thread(self):
         """
-        self.loop_thread = threading.Thread(target=self.run, daemon=True)
-        self.loop_start_timer = self.create_timer(0.0, self.start_loop_thread, callback_group=self.cbgroup_loop)
+        Body of the process thread: configures the process (setup), signals that it
+        is ready and runs its loop (run).
+        """
+        try:
+            self.setup()
+        except Exception:
+            self.get_logger().fatal(f"Setup of {self.name} failed, the process will not run:\n{traceback.format_exc()}")
+            raise
+        with self.ready_lock:
+            self.ready.set()
+            ready_callbacks, self.ready_callbacks = self.ready_callbacks, []
+        for node, callback in ready_callbacks:
+            node.executor.create_task(callback)
+        self.run()
 
-    def start_loop_thread(self):
+    def call_when_ready(self, node, callback):
         """
-        One-shot timer callback that starts the process loop thread.
+        Schedules a callback in the executor of a node once the setup of the process
+        has finished, or right away if it already has. Neither the caller nor the
+        callback wait, so nodes can use it from their callbacks.
+
+        :param node: Node whose executor runs the callback. It must already be spinning in
+            an executor, so call this method from one of its callbacks.
+        :type node: rclpy.node.Node
+        :param callback: Function without arguments.
+        :type callback: callable
         """
-        self.loop_start_timer.cancel()
-        self.destroy_timer(self.loop_start_timer)
-        if self.loop_thread.ident is None:
-            self.loop_thread.start()
+        with self.ready_lock:
+            if not self.ready.is_set():
+                self.ready_callbacks.append((node, callback))
+                return
+        node.executor.create_task(callback)
 
     def setup(self):
         """
@@ -127,6 +178,8 @@ class CognitiveProcess(Node):
         self.setup_ltm_suscription()
         self.setup_connectors()
         self.setup_control_channel()
+        # Created here, in the process thread: the constructor runs in an executor callback, where it must not wait for the service
+        self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
         self.LTM_changes_client.send_request(changes_topic=True)
 
     def setup_ltm_suscription(self):
