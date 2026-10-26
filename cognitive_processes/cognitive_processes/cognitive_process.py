@@ -10,6 +10,7 @@ from rclpy.time import Time
 
 from cognitive_nodes.episode import Episode, episode_obj_to_msg
 from core.service_client import ServiceClient
+from core.blocking_wait_check import check_blocking_wait
 from core.utils import class_from_classname, compare_perceptions, resolve_seed
 from core.container import Container, consolidate_containers
 
@@ -99,6 +100,7 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         self.node_clients = (
             {}
         )  # Keys are service name, values are service client object
+        self.own_clients = {}  # Clients created on this node (see own_client), by service name
 
         self.pause_service = self.create_service(Pause, f"{self.name}/pause", self.pause_callback, callback_group=self.cbgroup_server)
 
@@ -1030,17 +1032,13 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         old_perception_msg = old_perception.to_msg() if old_perception else ContainerMsg()
         perception_msg = perception.to_msg() if perception else ContainerMsg()
 
-        for goal in self.active_goals:
-            updated_reward=False
-            while not updated_reward:
-                service_name = "goal/" + str(goal) + "/get_reward"
-                if service_name not in self.node_clients:
-                    self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                reward = self.node_clients[service_name].send_request(
-                    old_perception=old_perception_msg, perception=perception_msg, update_space=update_space
-                )
-                rewards[goal] = reward.reward
-                updated_reward=reward.updated
+        # The rewards of all the goals are requested at once. A goal whose reward is not updated is asked again in the next round
+        self.request_rewards(
+            [(goal, f"goal/{goal}/get_reward",
+              GetReward.Request(old_perception=old_perception_msg, perception=perception_msg, update_space=update_space))
+             for goal in self.active_goals],
+            rewards,
+        )
 
         # Check if there are any drives not linked to goals
         self.unlinked_drives = self.get_unlinked_drives()
@@ -1051,17 +1049,90 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
                 drive for drive in self.unlinked_drives
                 if ltm_cache.get("Drive", {}).get(drive, {}).get("activation", 0) > self.activation_threshold
             ]
-            for drive in active_drives:
-                updated_reward=False
-                while not updated_reward:
-                    service_name = "drive/" + str(drive) + "/get_reward"
-                    if service_name not in self.node_clients:
-                        self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                    reward = self.node_clients[service_name].send_request(update_space=update_space)
-                    rewards[drive] = reward.reward
-                    updated_reward=reward.updated
+            self.request_rewards(
+                [(drive, f"drive/{drive}/get_reward", GetReward.Request(update_space=update_space)) for drive in active_drives],
+                rewards,
+            )
         self.get_logger().info(f"Reward_list: {rewards}")
         return rewards
+
+    def request_rewards(self, requests, rewards):
+        """
+        Requests several rewards at once, repeating the requests whose reward is not updated, and
+        stores them in rewards, in the order of the requests.
+
+        :param requests: (name, service name, request) of each reward.
+        :type requests: list
+        :param rewards: Dictionary where the rewards are stored, by name.
+        :type rewards: dict
+        """
+        pending = requests
+        while pending:
+            responses = self.call_services([(self.own_client(GetReward, service), request) for _, service, request in pending])
+            for (name, _, _), response in zip(pending, responses):
+                rewards[name] = response.reward
+            pending = [item for item, response in zip(pending, responses) if not response.updated]
+
+    def own_client(self, service_type, service_name):
+        """
+        Returns a client of a service created on this node, creating it the first time. A new client
+        waits until it sees its service, logging a warning periodically. To be used from the process
+        thread, together with call_services.
+
+        :param service_type: Service type.
+        :type service_type: type
+        :param service_name: Service name.
+        :type service_name: str
+        :return: The client.
+        :rtype: rclpy.client.Client
+        """
+        client = self.own_clients.get(service_name)
+        if client is None:
+            client = self.create_client(service_type, service_name, callback_group=self.cbgroup_client)
+            check_blocking_wait(f"a new client waits for the service {service_name}")
+            start = time.monotonic()
+            while not client.wait_for_service(timeout_sec=self.activation_warning_period):
+                self.get_logger().warning(f"Waiting for the service {service_name} for {time.monotonic() - start:.1f} s")
+            self.own_clients[service_name] = client
+        return client
+
+    def call_services(self, calls):
+        """
+        Sends several service requests at once and waits, in the process thread, until all the
+        responses have arrived. The clients belong to this node, so its executor, which runs in
+        another thread, receives the responses meanwhile. While waiting, it periodically logs a
+        warning with the missing responses. The wait has no limit.
+
+        :param calls: (client, request) of each call. The clients must belong to this node (see own_client).
+        :type calls: list
+        :return: The responses, in the order of the calls.
+        :rtype: list
+        """
+        if not calls:
+            return []
+        check_blocking_wait(f"the responses of {len(calls)} service calls")
+        all_done = threading.Event()
+        lock = threading.Lock()
+        remaining = [len(calls)]
+
+        def call_done(future):
+            with lock:
+                remaining[0] -= 1
+                if remaining[0] == 0:
+                    all_done.set()
+
+        futures = []
+        for client, request in calls:
+            future = client.call_async(request)
+            future.add_done_callback(call_done)
+            futures.append(future)
+        start = time.monotonic()
+        while not all_done.wait(timeout=self.activation_warning_period):
+            missing = [client.srv_name for (client, _), future in zip(calls, futures) if not future.done()]
+            self.get_logger().warning(
+                f"Waiting for {len(missing)} service responses for {time.monotonic() - start:.1f} s: {', '.join(missing)}"
+            )
+        return [future.result() for future in futures]
 
     def get_unlinked_drives(self):
         """
