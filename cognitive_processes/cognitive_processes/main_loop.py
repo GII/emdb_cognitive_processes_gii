@@ -1,4 +1,5 @@
 import sys
+import os
 import rclpy
 from rclpy.node import Node
 from operator import attrgetter
@@ -619,6 +620,9 @@ class MainLoop(CognitiveProcess):
         self.update_activations()
         self.update_rewards(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
+        # PERF: EMDB_PERF_FILE=<path> records the wall-clock time at the end of each iteration.
+        perf_path = os.environ.get("EMDB_PERF_FILE")
+        perf_file = open(perf_path, "w", buffering=1) if perf_path else None
         
         while (self.iteration <= self.iterations) and (not self.stop):
 
@@ -665,8 +669,12 @@ class MainLoop(CognitiveProcess):
                 )
                 
                 self.update_status()
+                if perf_file:
+                    perf_file.write(f"{self.iteration} {time.time():.6f}\n")
                 self.iteration += 1
 
+        if perf_file:
+            perf_file.close()
         self.close_files()
         if self.kill_on_finish:
             self.call_services([(self.kill_commander_client, StopExecution.Request())])
