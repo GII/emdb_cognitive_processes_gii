@@ -7,7 +7,6 @@ from scipy.stats.qmc import LatinHypercube
 from cognitive_nodes.episode import Episode, episode_obj_to_msg, container_msg_to_episode, container_to_episode_obj
 from core.container import Container
 from cognitive_processes.cognitive_process import CognitiveProcess
-from core.service_client import ServiceClient
 from cognitive_node_interfaces.srv import AddPoints, Predict
 
 
@@ -117,10 +116,8 @@ class Deliberation(CognitiveProcess):
         :rtype: list[float]
         """
         service_name = "world_model/" + str(world_model) + "/predict"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Predict, service_name)
         # Use the World Model's predict method to get the predicted states
-        predicted_episodes = self.node_clients[service_name].send_request(input_episodes=episode_obj_to_msg(input_episodes))
+        predicted_episodes = self.call_services([(self.own_client(Predict, service_name), Predict.Request(input_episodes=episode_obj_to_msg(input_episodes)))])[0]
         return container_msg_to_episode(predicted_episodes.output_episodes)
     
     def predict_utilities(self, input_episodes: Episode) -> list[float]:
@@ -316,12 +313,8 @@ class Deliberation(CognitiveProcess):
 
     def add_pnode_points(self, pnode: str, trace: Episode, confidences: np.ndarray):
         service_name = "pnode/" + str(pnode) + "/add_points"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(
-                AddPoints, service_name
-            )
         points = trace.perception # TODO: Remove the last element of this container, shouldn't be included as part of the trace data
-        response = self.node_clients[service_name].send_request(points=points.to_msg(), confidences=confidences.tolist())
+        response = self.call_services([(self.own_client(AddPoints, service_name), AddPoints.Request(points=points.to_msg(), confidences=confidences.tolist()))])[0]
         return response.added
     
     def initialize_buffer(self):
