@@ -13,7 +13,6 @@ from collections import deque
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 
-from core.service_client import ServiceClient
 from core.container import Container
 from cognitive_nodes.episode import Episode
 from cognitive_node_interfaces.srv import Execute
@@ -95,7 +94,7 @@ class MainLoop(CognitiveProcess):
         # The files go first: the episode subscription created by the base setup writes to them
         self.setup_files()
         super().setup()
-        self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
+        self.kill_commander_client = self.own_client(StopExecution, 'commander/kill')
 
     def setup_control_channel(self):
         super().setup_control_channel()
@@ -563,7 +562,7 @@ class MainLoop(CognitiveProcess):
             current_world = self.current_world if self.current_world else "None"
             if getattr(self, "world_reset_client", None):
                 self.get_logger().info("Requesting world reset service...")
-                self.world_reset_client.send_request(iteration=self.iteration, world=current_world)
+                self.call_services([(self.world_reset_client, self.world_reset_client.srv_type.Request(iteration=self.iteration, world=current_world))])
             self.get_logger().info("Asking for a world reset...")
             msg = ControlMsg()
             msg.command = "reset_world"
@@ -670,7 +669,7 @@ class MainLoop(CognitiveProcess):
 
         self.close_files()
         if self.kill_on_finish:
-            self.kill_commander_client.send_request()
+            self.call_services([(self.kill_commander_client, StopExecution.Request())])
 
 
 class MainLoopLight(MainLoop):
@@ -730,10 +729,8 @@ class MainLoopLight(MainLoop):
             service_name = "utility_model/" + str(policy) + "/execute"
         else:
             service_name = "policy/" + str(policy) + "/execute"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception.to_msg()
-        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
+        policy_response = self.call_services([(self.own_client(Execute, service_name), Execute.Request(perception=perc_msg))])[0]
         episode = container_msg_to_episode(policy_response.episode)
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, episode 
@@ -801,7 +798,7 @@ class MainLoopLight(MainLoop):
 
         self.close_files()
         if self.kill_on_finish:
-            self.kill_commander_client.send_request()
+            self.call_services([(self.kill_commander_client, StopExecution.Request())])
 
 def main(args=None):
     rclpy.init()
