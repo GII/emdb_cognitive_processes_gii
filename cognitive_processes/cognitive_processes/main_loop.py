@@ -1,4 +1,5 @@
 import sys
+import os
 import rclpy
 from rclpy.node import Node
 from operator import attrgetter
@@ -8,11 +9,11 @@ import threading
 import numpy
 import time
 from copy import copy, deepcopy
+from collections import deque
 
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 
-from core.service_client import ServiceClient
 from core.container import Container
 from cognitive_nodes.episode import Episode
 from cognitive_node_interfaces.srv import Execute
@@ -62,9 +63,13 @@ class MainLoop(CognitiveProcess):
 
         # --- File/output management ---
         self.files = []
-        # Files are written from the loop thread and from the episodes callback (executor thread)
+        # Only the loop thread writes the files. The episodes callback just queues the episodes, which
+        # the loop thread writes in update_status and close_files. files_lock is only shared with
+        # destroy_node, which closes the files when the execution node shuts down; no callback takes it,
+        # so the loop thread can hold it while the files wait for service responses.
         self.files_lock = threading.Lock()
         self.files_closed = False
+        self.pending_episodes = deque()  # Episodes received and not written yet (deque: thread safe appends and pops)
         self.pnodes_success = {}
 
         # --- Experiment tracking ---
@@ -74,10 +79,8 @@ class MainLoop(CognitiveProcess):
         self.last_reset = 0
         self.kill_on_finish = kill_on_finish
 
-        # Read LTM and configure perceptions
+        # The process thread (setup and run) starts after the constructor
         self.set_attributes_from_params(params)
-        self.setup()
-        self.start_threading()
 
 
     # =========================
@@ -89,9 +92,10 @@ class MainLoop(CognitiveProcess):
         Initial configuration of the MainLoop node.
         This method sets up the LTM, perceptions, files, connectors, control channel, etc.
         """
-        super().setup()
+        # The files go first: the episode subscription created by the base setup writes to them
         self.setup_files()
-        self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
+        super().setup()
+        self.kill_commander_client = self.own_client(StopExecution, 'commander/kill')
 
     def setup_control_channel(self):
         super().setup_control_channel()
@@ -104,13 +108,12 @@ class MainLoop(CognitiveProcess):
     # =========================
 
     def receive_episode_callback(self, msg):
+        """
+        Queues a received episode. The loop thread writes it to the files (see write_pending_episodes),
+        so this callback never waits for the files.
+        """
         self.episode_count+=1
-        with self.files_lock:
-            if self.files_closed:
-                return
-            for file in self.files:
-                self.open_file(file)
-                file.write_episode(msg)
+        self.pending_episodes.append(msg)
 
     # =========================
     # File Handling
@@ -149,15 +152,27 @@ class MainLoop(CognitiveProcess):
         with self.files_lock:
             if self.files_closed:
                 return
+            self.write_pending_episodes()
             for file in self.files:
                 self.get_logger().info(f"Writing file: {file.file_name}")
                 self.open_file(file)
                 file.write()
 
+    def write_pending_episodes(self):
+        """
+        Writes the queued episodes to the files, in the order they were received. It must be called
+        with files_lock held.
+        """
+        while self.pending_episodes:
+            msg = self.pending_episodes.popleft()
+            for file in self.files:
+                self.open_file(file)
+                file.write_episode(msg)
+
     def open_file(self, file):
         """
         Opens a file (and writes its header) the first time it is used. It must be called with
-        files_lock held, so that a file is opened only once although two threads use it.
+        files_lock held.
 
         :param file: The file.
         :type file: core.file.File
@@ -167,11 +182,13 @@ class MainLoop(CognitiveProcess):
 
     def close_files(self):
         """
-        Close all files when execution is finished. Files are closed only once.
+        Close all files when execution is finished, after writing the queued episodes. Files are
+        closed only once.
         """
         with self.files_lock:
             if self.files_closed:
                 return
+            self.write_pending_episodes()
             self.files_closed = True
             self.get_logger().info("Closing files...")
             for file in self.files:
@@ -184,6 +201,10 @@ class MainLoop(CognitiveProcess):
         their nodes when they shut down, also when the process receives SIGTERM (e.g. from the
         commander at the end of the experiment) or SIGINT, so the files are always closed. Some of
         them are only written when they are closed (e.g. the episodes dataset).
+
+        Then it runs after the executor has stopped, not in a callback. If the loop thread is writing
+        the files, it waits until it finishes. A node deleted through the delete service of its
+        execution node is destroyed in a callback, so that wait would block the executor.
         """
         self.stop = True
         self.close_files()
@@ -542,7 +563,7 @@ class MainLoop(CognitiveProcess):
             current_world = self.current_world if self.current_world else "None"
             if getattr(self, "world_reset_client", None):
                 self.get_logger().info("Requesting world reset service...")
-                self.world_reset_client.send_request(iteration=self.iteration, world=current_world)
+                self.call_services([(self.world_reset_client, self.world_reset_client.srv_type.Request(iteration=self.iteration, world=current_world))])
             self.get_logger().info("Asking for a world reset...")
             msg = ControlMsg()
             msg.command = "reset_world"
@@ -599,6 +620,9 @@ class MainLoop(CognitiveProcess):
         self.update_activations()
         self.update_rewards(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
+        # PERF: EMDB_PERF_FILE=<path> records the wall-clock time at the end of each iteration.
+        perf_path = os.environ.get("EMDB_PERF_FILE")
+        perf_file = open(perf_path, "w", buffering=1) if perf_path else None
         
         while (self.iteration <= self.iterations) and (not self.stop):
 
@@ -645,11 +669,15 @@ class MainLoop(CognitiveProcess):
                 )
                 
                 self.update_status()
+                if perf_file:
+                    perf_file.write(f"{self.iteration} {time.time():.6f}\n")
                 self.iteration += 1
 
+        if perf_file:
+            perf_file.close()
         self.close_files()
         if self.kill_on_finish:
-            self.kill_commander_client.send_request()
+            self.call_services([(self.kill_commander_client, StopExecution.Request())])
 
 
 class MainLoopLight(MainLoop):
@@ -709,10 +737,8 @@ class MainLoopLight(MainLoop):
             service_name = "utility_model/" + str(policy) + "/execute"
         else:
             service_name = "policy/" + str(policy) + "/execute"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception.to_msg()
-        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
+        policy_response = self.call_services([(self.own_client(Execute, service_name), Execute.Request(perception=perc_msg))])[0]
         episode = container_msg_to_episode(policy_response.episode)
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, episode 
@@ -780,7 +806,7 @@ class MainLoopLight(MainLoop):
 
         self.close_files()
         if self.kill_on_finish:
-            self.kill_commander_client.send_request()
+            self.call_services([(self.kill_commander_client, StopExecution.Request())])
 
 def main(args=None):
     rclpy.init()

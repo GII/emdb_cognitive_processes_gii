@@ -1,5 +1,6 @@
 import threading
 import time
+import traceback
 import numpy as np
 import yaml
 
@@ -8,7 +9,8 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.time import Time
 
 from cognitive_nodes.episode import Episode, episode_obj_to_msg
-from core.service_client import ServiceClient
+from core.blocking_wait_check import check_blocking_wait
+from core.service_client import SERVICE_CHECK_PERIOD
 from core.utils import class_from_classname, compare_perceptions, resolve_seed
 from core.container import Container, consolidate_containers
 
@@ -19,9 +21,25 @@ from cognitive_node_interfaces.msg import Activation
 from cognitive_node_interfaces.srv import GetActivation, AddPoints, IsSatisfied, GetReward, Execute, DuplicateNode, LogExecution
 from cognitive_processes_interfaces.srv import Pause
 
-class CognitiveProcess(Node):
+class StartsAfterConstruction(type):
+    """
+    Metaclass of the cognitive processes: starts the process thread once the object
+    has been fully constructed, that is, after the constructor of the class being
+    instantiated, whatever its depth in the hierarchy. Subclasses inherit it, so
+    they don't have to start the thread themselves.
+    """
+    def __call__(cls, *args, **kwargs):
+        process = super().__call__(*args, **kwargs)  # Runs the whole chain of constructors
+        process.start_process_thread()
+        return process
+
+
+class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
     """
     CognitiveProcess class, base class for cognitive processes in the architecture.
+
+    The process runs in its own thread (setup, then run), which starts automatically
+    once the object has been fully constructed (see StartsAfterConstruction).
     """
     def __init__(self, name, iterations = 0, trials = 1, LTM_id="", **params):
         """
@@ -37,6 +55,10 @@ class CognitiveProcess(Node):
         self.period = 1
         self.paused = False
         self.stop = False
+        self.ready = threading.Event()  # Set when setup has finished
+        self.ready_lock = threading.Lock()  # Protects ready_callbacks and the change of ready
+        self.ready_callbacks = []  # (node, callback) pairs to schedule when the process is ready (see call_when_ready)
+        self.loop_thread = None  # Process thread, started after the constructor (see StartsAfterConstruction)
 
         # --- LTM and STM ---
         self.current_episode = Episode()
@@ -75,12 +97,10 @@ class CognitiveProcess(Node):
         self.cbgroup_perception = MutuallyExclusiveCallbackGroup()
         self.cbgroup_server = MutuallyExclusiveCallbackGroup()
         self.cbgroup_client = MutuallyExclusiveCallbackGroup()
-        self.cbgroup_loop = MutuallyExclusiveCallbackGroup()
         self.node_clients = (
             {}
         )  # Keys are service name, values are service client object
-
-        self.LTM_changes_client = ServiceClient(SetChangesTopic, f"{self.LTM_id}/set_changes_topic")
+        self.own_clients = {}  # Clients created on this node (see own_client), by service name
 
         self.pause_service = self.create_service(Pause, f"{self.name}/pause", self.pause_callback, callback_group=self.cbgroup_server)
 
@@ -94,25 +114,58 @@ class CognitiveProcess(Node):
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
             setattr(self, key, value)
 
+    def start_process_thread(self):
+        """
+        Starts the process (setup and run) in its own thread. The metaclass calls it
+        once the object has been fully constructed. Further calls do nothing.
+        """
+        if self.loop_thread is not None:
+            return
+        self.loop_thread = threading.Thread(target=self.process_thread, daemon=True)
+        self.loop_thread.start()
+
     def start_threading(self):
         """
-        Schedules the start of the process loop (run) in its own thread.
+        No longer needed: the process thread starts automatically once the object has
+        been fully constructed. Kept so that processes that still call it from their
+        constructor don't start the thread too early. It only logs a warning.
+        """
+        self.get_logger().warning(f"{type(self).__name__} calls start_threading(), which is no longer needed: the process thread starts automatically after the constructor")
 
-        Processes call this method from their constructor, so the thread is not
-        started here but from a one-shot timer, once the node is spinning. This
-        way, subclasses finish their own initialization before run is called.
+    def process_thread(self):
         """
-        self.loop_thread = threading.Thread(target=self.run, daemon=True)
-        self.loop_start_timer = self.create_timer(0.0, self.start_loop_thread, callback_group=self.cbgroup_loop)
+        Body of the process thread: configures the process (setup), signals that it
+        is ready and runs its loop (run).
+        """
+        try:
+            self.setup()
+        except Exception:
+            self.get_logger().fatal(f"Setup of {self.name} failed, the process will not run:\n{traceback.format_exc()}")
+            raise
+        with self.ready_lock:
+            self.ready.set()
+            ready_callbacks, self.ready_callbacks = self.ready_callbacks, []
+        for node, callback in ready_callbacks:
+            node.executor.create_task(callback)
+        self.run()
 
-    def start_loop_thread(self):
+    def call_when_ready(self, node, callback):
         """
-        One-shot timer callback that starts the process loop thread.
+        Schedules a callback in the executor of a node once the setup of the process
+        has finished, or right away if it already has. Neither the caller nor the
+        callback wait, so nodes can use it from their callbacks.
+
+        :param node: Node whose executor runs the callback. It must already be spinning in
+            an executor, so call this method from one of its callbacks.
+        :type node: rclpy.node.Node
+        :param callback: Function without arguments.
+        :type callback: callable
         """
-        self.loop_start_timer.cancel()
-        self.destroy_timer(self.loop_start_timer)
-        if self.loop_thread.ident is None:
-            self.loop_thread.start()
+        with self.ready_lock:
+            if not self.ready.is_set():
+                self.ready_callbacks.append((node, callback))
+                return
+        node.executor.create_task(callback)
 
     def setup(self):
         """
@@ -127,7 +180,8 @@ class CognitiveProcess(Node):
         self.setup_ltm_suscription()
         self.setup_connectors()
         self.setup_control_channel()
-        self.LTM_changes_client.send_request(changes_topic=True)
+        # Here, in the process thread: the constructor runs in an executor callback, where it must not wait for the service
+        self.call_services([(self.own_client(SetChangesTopic, f"{self.LTM_id}/set_changes_topic"), SetChangesTopic.Request(changes_topic=True))])
 
     def setup_ltm_suscription(self):
         """
@@ -158,9 +212,9 @@ class CognitiveProcess(Node):
         self.control_publisher = self.create_publisher(class_from_classname(control_msg), self.Control["control_topic"], 10)
         self.episode_publisher = self.create_publisher(class_from_classname(episode_msg), self.Control["episodes_topic"], 10)
         if world_reset_msg and world_reset_service:
-            self.world_reset_client = ServiceClient(class_from_classname(world_reset_msg), world_reset_service)
+            self.world_reset_client = self.own_client(class_from_classname(world_reset_msg), world_reset_service)
         if self.action_service and self.action_msg:
-            self.action_client = ServiceClient(class_from_classname(self.action_msg), self.action_service)
+            self.action_client = self.own_client(class_from_classname(self.action_msg), self.action_service)
 
     def configure_perceptions(
         self,
@@ -274,9 +328,7 @@ class CognitiveProcess(Node):
         # Call get_node service from LTM
         service_name = "/" + str(self.LTM_id) + "/get_node"
         request = ""
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(GetNodeFromLTM, service_name)
-        ltm_response = self.node_clients[service_name].send_request(name=request)
+        ltm_response = self.call_services([(self.own_client(GetNodeFromLTM, service_name), GetNodeFromLTM.Request(name=request))])[0]
         ltm = yaml.safe_load(ltm_response.data)
 
         return ltm
@@ -297,10 +349,8 @@ class CognitiveProcess(Node):
         :rtype: The executed policy.
         """
         service_name = "policy/" + str(policy) + "/execute"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Execute, service_name)
         perc_msg=perception.to_msg()
-        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
+        policy_response = self.call_services([(self.own_client(Execute, service_name), Execute.Request(perception=perc_msg))])[0]
         episode = policy_response.episode
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, episode 
@@ -316,7 +366,7 @@ class CognitiveProcess(Node):
         """
         if self.action_client:
             actuation_msg = action.to_msg()
-            response = self.action_client.send_request(action=actuation_msg)
+            response = self.call_services([(self.action_client, self.action_client.srv_type.Request(action=actuation_msg))])[0]
             self.get_logger().info("Executed action with response: " + str(response))
             return response
         else:
@@ -526,10 +576,8 @@ class CognitiveProcess(Node):
         """
 
         service_name = "cognitive_node/" + str(name) + "/get_activation"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(GetActivation, service_name)
         perception_msg = perception.to_msg()
-        activation = self.node_clients[service_name].send_request(perception=perception_msg)
+        activation = self.call_services([(self.own_client(GetActivation, service_name), GetActivation.Request(perception=perception_msg))])[0]
         return activation
     
     def create_activation_input(self, name, node_type): #Adds a node from the activation inputs list.
@@ -615,11 +663,8 @@ class CognitiveProcess(Node):
         """
 
         service_name = f"{node_type}/" + str(name) + "/add_points"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(AddPoints, service_name)
-
         perception_msg = perception.to_msg()
-        response = self.node_clients[service_name].send_request(points=perception_msg, confidences=[confidence])
+        response = self.call_services([(self.own_client(AddPoints, service_name), AddPoints.Request(points=perception_msg, confidences=[confidence]))])[0]
         added = getattr(response, 'added', False)
         if added:
             self.get_logger().info(f"Added point in {node_type} {name}")
@@ -645,13 +690,8 @@ class CognitiveProcess(Node):
         """
 
         service_name = f"{node_type}/" + str(name) + "/add_points"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(
-                AddPoints, service_name
-            )
-
         perception = perception.to_msg()
-        response = self.node_clients[service_name].send_request(points=perception, confidences=[-1.0*confidence])
+        response = self.call_services([(self.own_client(AddPoints, service_name), AddPoints.Request(points=perception, confidences=[-1.0*confidence]))])[0]
         added = getattr(response, 'added', False)
         if added:
             self.get_logger().info(f"Added anti-point in {node_type} {name}")
@@ -723,9 +763,7 @@ class CognitiveProcess(Node):
         :type success: bool
         """
         logging_service = f"cnode/{cnode_name}/log_execution"
-        if logging_service not in self.node_clients:
-            self.node_clients[logging_service] = ServiceClient(LogExecution, logging_service)
-        response = self.node_clients[logging_service].send_request(success=success)
+        response = self.call_services([(self.own_client(LogExecution, logging_service), LogExecution.Request(success=success))])[0]
         return response.added
 
     def new_goal(self, perception, drive):
@@ -776,11 +814,7 @@ class CognitiveProcess(Node):
         :rtype: str
         """
         duplicate_service = f"cognitive_node/{node_name}/duplicate_node"
-        if duplicate_service not in self.node_clients:
-            self.node_clients[duplicate_service] = ServiceClient(DuplicateNode, duplicate_service)
-        response = self.node_clients[duplicate_service].send_request(
-            include_neighbors=True
-        )
+        response = self.call_services([(self.own_client(DuplicateNode, duplicate_service), DuplicateNode.Request(include_neighbors=True))])[0]
         new_goal_name = response.duplicate_node_name
         self.add_point(new_goal_name, perception, node_type="goal")
         return new_goal_name
@@ -803,11 +837,7 @@ class CognitiveProcess(Node):
         self.get_logger().info("Requesting node creation")
         params_str = yaml.dump(parameters, sort_keys=False)
         service_name = "commander/create"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(CreateNode, service_name)
-        response = self.node_clients[service_name].send_request(
-            name=name, class_name=class_name, parameters=params_str
-        )
+        response = self.call_services([(self.own_client(CreateNode, service_name), CreateNode.Request(name=name, class_name=class_name, parameters=params_str))])[0]
         return response.created 
 
     def request_neighbors(self, name):
@@ -839,9 +869,7 @@ class CognitiveProcess(Node):
         :rtype: bool
         """
         service_name=f"{self.LTM_id}/update_neighbor"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(UpdateNeighbor, service_name)
-        response=self.node_clients[service_name].send_request(node_name=node_name, neighbor_name=neighbor_name, operation=True)
+        response = self.call_services([(self.own_client(UpdateNeighbor, service_name), UpdateNeighbor.Request(node_name=node_name, neighbor_name=neighbor_name, operation=True))])[0]
         return response.success
 
     # =========================
@@ -977,17 +1005,13 @@ class CognitiveProcess(Node):
         old_perception_msg = old_perception.to_msg() if old_perception else ContainerMsg()
         perception_msg = perception.to_msg() if perception else ContainerMsg()
 
-        for goal in self.active_goals:
-            updated_reward=False
-            while not updated_reward:
-                service_name = "goal/" + str(goal) + "/get_reward"
-                if service_name not in self.node_clients:
-                    self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                reward = self.node_clients[service_name].send_request(
-                    old_perception=old_perception_msg, perception=perception_msg, update_space=update_space
-                )
-                rewards[goal] = reward.reward
-                updated_reward=reward.updated
+        # The rewards of all the goals are requested at once. A goal whose reward is not updated is asked again in the next round
+        self.request_rewards(
+            [(goal, f"goal/{goal}/get_reward",
+              GetReward.Request(old_perception=old_perception_msg, perception=perception_msg, update_space=update_space))
+             for goal in self.active_goals],
+            rewards,
+        )
 
         # Check if there are any drives not linked to goals
         self.unlinked_drives = self.get_unlinked_drives()
@@ -998,17 +1022,95 @@ class CognitiveProcess(Node):
                 drive for drive in self.unlinked_drives
                 if ltm_cache.get("Drive", {}).get(drive, {}).get("activation", 0) > self.activation_threshold
             ]
-            for drive in active_drives:
-                updated_reward=False
-                while not updated_reward:
-                    service_name = "drive/" + str(drive) + "/get_reward"
-                    if service_name not in self.node_clients:
-                        self.node_clients[service_name] = ServiceClient(GetReward, service_name)
-                    reward = self.node_clients[service_name].send_request(update_space=update_space)
-                    rewards[drive] = reward.reward
-                    updated_reward=reward.updated
+            self.request_rewards(
+                [(drive, f"drive/{drive}/get_reward", GetReward.Request(update_space=update_space)) for drive in active_drives],
+                rewards,
+            )
         self.get_logger().info(f"Reward_list: {rewards}")
         return rewards
+
+    def request_rewards(self, requests, rewards):
+        """
+        Requests several rewards at once, repeating the requests whose reward is not updated, and
+        stores them in rewards, in the order of the requests.
+
+        :param requests: (name, service name, request) of each reward.
+        :type requests: list
+        :param rewards: Dictionary where the rewards are stored, by name.
+        :type rewards: dict
+        """
+        pending = requests
+        while pending:
+            responses = self.call_services([(self.own_client(GetReward, service), request) for _, service, request in pending])
+            for (name, _, _), response in zip(pending, responses):
+                rewards[name] = response.reward
+            pending = [item for item, response in zip(pending, responses) if not response.updated]
+
+    def own_client(self, service_type, service_name):
+        """
+        Returns a client of a service created on this node, creating it the first time. A new client
+        waits until it sees its service, logging a warning periodically. To be used from the process
+        thread, together with call_services.
+
+        :param service_type: Service type.
+        :type service_type: type
+        :param service_name: Service name.
+        :type service_name: str
+        :return: The client.
+        :rtype: rclpy.client.Client
+        """
+        client = self.own_clients.get(service_name)
+        if client is None:
+            client = self.create_client(service_type, service_name, callback_group=self.cbgroup_client)
+            check_blocking_wait(f"a new client waits for the service {service_name}")
+            # Own loop instead of wait_for_service, which checks every 0.25 s
+            start = time.monotonic()
+            next_warning = start + self.activation_warning_period
+            while not client.service_is_ready():
+                time.sleep(SERVICE_CHECK_PERIOD)
+                if time.monotonic() >= next_warning:
+                    self.get_logger().warning(f"Waiting for the service {service_name} for {time.monotonic() - start:.1f} s")
+                    next_warning += self.activation_warning_period
+            self.own_clients[service_name] = client
+        return client
+
+    def call_services(self, calls):
+        """
+        Sends several service requests at once and waits, in the process thread, until all the
+        responses have arrived. The clients belong to this node, so its executor, which runs in
+        another thread, receives the responses meanwhile. While waiting, it periodically logs a
+        warning with the missing responses. The wait has no limit.
+
+        :param calls: (client, request) of each call. The clients must belong to this node (see own_client).
+        :type calls: list
+        :return: The responses, in the order of the calls.
+        :rtype: list
+        """
+        if not calls:
+            return []
+        check_blocking_wait(f"the responses of {len(calls)} service calls")
+        all_done = threading.Event()
+        lock = threading.Lock()
+        remaining = [len(calls)]
+
+        def call_done(future):
+            with lock:
+                remaining[0] -= 1
+                if remaining[0] == 0:
+                    all_done.set()
+
+        futures = []
+        for client, request in calls:
+            future = client.call_async(request)
+            future.add_done_callback(call_done)
+            futures.append(future)
+        start = time.monotonic()
+        while not all_done.wait(timeout=self.activation_warning_period):
+            missing = [client.srv_name for (client, _), future in zip(calls, futures) if not future.done()]
+            self.get_logger().warning(
+                f"Waiting for {len(missing)} service responses for {time.monotonic() - start:.1f} s: {', '.join(missing)}"
+            )
+        return [future.result() for future in futures]
 
     def get_unlinked_drives(self):
         """
@@ -1072,17 +1174,18 @@ class CognitiveProcess(Node):
         """
         self.get_logger().info("Reading satisfaction...")
         satisfaction = {}
-        response=IsSatisfied.Response()
-        for purpose in purpose_list:
-            service_name = "robot_purpose/" + str(purpose) + "/get_satisfaction"
-            if service_name not in self.node_clients:
-                self.node_clients[service_name] = ServiceClient(IsSatisfied, service_name)
-            while not response.updated:
-                response = self.node_clients[service_name].send_request(
-                    timestamp=timestamp.to_msg()
-                )
-            satisfaction[purpose] = dict(satisfied=response.satisfied, purpose_type=response.purpose_type, terminal=response.terminal)
-            response.updated = False
+        # The satisfaction of all the purposes is requested at once. A purpose whose satisfaction is not updated is asked again in the next round
+        pending = list(purpose_list)
+        while pending:
+            responses = self.call_services([
+                (self.own_client(IsSatisfied, f"robot_purpose/{purpose}/get_satisfaction"), IsSatisfied.Request(timestamp=timestamp.to_msg()))
+                for purpose in pending
+            ])
+            for purpose, response in zip(pending, responses):
+                if response.updated:
+                    satisfaction[purpose] = dict(satisfied=response.satisfied, purpose_type=response.purpose_type, terminal=response.terminal)
+            pending = [purpose for purpose, response in zip(pending, responses) if not response.updated]
+        satisfaction = {purpose: satisfaction[purpose] for purpose in purpose_list}
 
         self.get_logger().info(f"Satisfaction list: {satisfaction}")
 
