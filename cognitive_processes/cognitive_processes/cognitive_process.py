@@ -10,6 +10,7 @@ from rclpy.time import Time
 
 from cognitive_nodes.episode import Episode, episode_obj_to_msg
 from core.blocking_wait_check import check_blocking_wait
+from core.service_client import SERVICE_CHECK_PERIOD
 from core.utils import class_from_classname, compare_perceptions, resolve_seed
 from core.container import Container, consolidate_containers
 
@@ -1062,9 +1063,14 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         if client is None:
             client = self.create_client(service_type, service_name, callback_group=self.cbgroup_client)
             check_blocking_wait(f"a new client waits for the service {service_name}")
+            # Own loop instead of wait_for_service, which checks every 0.25 s
             start = time.monotonic()
-            while not client.wait_for_service(timeout_sec=self.activation_warning_period):
-                self.get_logger().warning(f"Waiting for the service {service_name} for {time.monotonic() - start:.1f} s")
+            next_warning = start + self.activation_warning_period
+            while not client.service_is_ready():
+                time.sleep(SERVICE_CHECK_PERIOD)
+                if time.monotonic() >= next_warning:
+                    self.get_logger().warning(f"Waiting for the service {service_name} for {time.monotonic() - start:.1f} s")
+                    next_warning += self.activation_warning_period
             self.own_clients[service_name] = client
         return client
 
