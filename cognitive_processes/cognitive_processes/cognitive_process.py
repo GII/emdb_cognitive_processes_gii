@@ -7,6 +7,7 @@ import yaml
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.time import Time
+from rclpy.logging import LoggingSeverity
 
 from cognitive_nodes.episode import Episode, episode_obj_to_msg
 from core.blocking_wait_check import check_blocking_wait
@@ -405,12 +406,16 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
 
         self.perception_time = self.get_clock().now().nanoseconds
 
+        # The debug texts are built only if they are going to be logged: perceptions are read several times per iteration
+        debug = self.get_logger().is_enabled_for(LoggingSeverity.DEBUG)
+
         # Clear all flags to get fresh readings
         for (
             sensor
         ) in self.perception_cache.keys():  # TODO: Consider perception activation when reading
             self.perception_cache[sensor]["flag"].clear()
-            self.get_logger().debug("Clearing flags: " + str(sensor))
+            if debug:
+                self.get_logger().debug("Clearing flags: " + str(sensor))
         
         # Wait for all perceptions to be updated
         for (
@@ -420,12 +425,14 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
                 self.get_logger().warning(f"Timeout waiting for perception of sensor {sensor}")
                 self.perception_cache[sensor]["flag"].wait()
             self.perception_cache[sensor]["flag"].clear()
-            self.get_logger().debug("Processing perception: " + str(sensor))
+            if debug:
+                self.get_logger().debug("Processing perception: " + str(sensor))
 
         # Write the perceptions in the perception container and return it
         perception_data = [self.perception_cache[sensor]["data"] for sensor in self.perception_cache.keys()]
         self.latest_perception = consolidate_containers(perception_data, name="perception", container_type="perception")
-        self.get_logger().debug("DEBUG Read Perceptions: " + str(self.latest_perception))
+        if debug:
+            self.get_logger().debug("DEBUG Read Perceptions: " + str(self.latest_perception))
         return self.latest_perception
 
     def receive_perception_callback(self, msg):
@@ -516,7 +523,9 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
                 # Releases the lock while waiting, so the executor callbacks can run
                 self.activation_condition.wait(timeout=deadline - now)
         self.activation_logs = False
-        self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
+        # The text of the whole LTM cache is built only if it is going to be logged
+        if self.get_logger().is_enabled_for(LoggingSeverity.DEBUG):
+            self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
         return True
 
     def pending_activations(self):
