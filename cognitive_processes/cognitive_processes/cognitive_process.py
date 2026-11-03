@@ -727,10 +727,14 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         world_model = self.get_current_world_model()
         ident = f"{world_model}__{goal}__{policy}"
 
-        space_class = self.default_class.get("Space") # NOTE: Space class is now passed through the P-Node's parameters in the yaml file
+        space_class = self.default_class.get("Space")
         space_params = self.default_params.get("Space", {}) #TODO: Pass any parameters from yaml file if needed
         pnode_class = self.default_class.get("PNode")
-        pnode_params = self.default_params.get("PNode", {})
+        pnode_params = dict(self.default_params.get("PNode", {}))
+        # The space class goes in the parameters of the PNode connector. If they don't have it, the one of the
+        # Space connector is used, as in new_goal
+        if pnode_params.get("space_class") is None and space_class is not None:
+            pnode_params["space_class"] = space_class
         cnode_class = self.default_class.get("CNode")
         cnode_params = self.default_params.get("CNode", {})
 
