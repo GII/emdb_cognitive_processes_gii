@@ -38,7 +38,9 @@ The behavior of the deliberation process can be seen in the following diagram:
 
 <!-- More cognitive processes will come, as those related to learning processes, necessary to generate and adapt world models, utility models, and policies. -->
 
-In the section [Main Loop API Documentation](cognitive_processes/main_loop.rst) you can find the API documentation of the different processes.
+The **reaction** cognitive process is similar to deliberation, but it executes a closed-loop reactive policy instead of deliberating about candidate actions. It is instantiated inside of learned policies.
+
+In the section [Cognitive Processes API Documentation](cognitive_processes/main_loop.rst) you can find the API documentation of the different processes.
 
 [^1]: Duro, R. J., Becerra, J. A., Monroy, J., & Bellas, F. (2019). Perceptual generalization and context in a network memory inspired long-term memory for artificial cognition. _International Journal of Neural Systems, 29(06)_, 1850053.
 
