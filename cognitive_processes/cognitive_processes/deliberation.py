@@ -1,5 +1,4 @@
 import numpy as np
-import threading
 import traceback
 from copy import deepcopy, copy
 from scipy.stats.qmc import LatinHypercube
@@ -25,9 +24,6 @@ class Deliberation(CognitiveProcess):
         self.summary_episode = Episode()
         self.summary_episode.parent_policy = self.node.name
 
-        self.start_flag = threading.Event()
-        self.finished_flag = threading.Event()
-        
         self.softmax_selection = softmax_selection
         self.softmax_temperature = softmax_temperature
         self.candidate_generation = candidate_generation
@@ -63,8 +59,9 @@ class Deliberation(CognitiveProcess):
 
     def skipped_activation_inputs(self):
         """
-        The parent node does not publish its activation while the process runs, so its
-        activation is not waited for (it would be a deadlock).
+        The parent node may not publish its activation while the process runs (with the Python
+        executors, its execute callback keeps busy the callback group of its activation timer), so
+        its activation is not waited for (it would be a deadlock).
         """
         return {self.node.name}
 
@@ -115,6 +112,10 @@ class Deliberation(CognitiveProcess):
         :return: List of predicted utilities.
         :rtype: list[float]
         """
+        if world_model is None:
+            # There is no world model yet (e.g. they are created during the experiment): the perception is not expected to change
+            self.get_logger().info("No world model to predict with, using the current perceptions")
+            return Episode(perception=input_episodes.old_perception)
         service_name = "world_model/" + str(world_model) + "/predict"
         # Use the World Model's predict method to get the predicted states
         predicted_episodes = self.call_services([(self.own_client(Predict, service_name), Predict.Request(input_episodes=episode_obj_to_msg(input_episodes)))])[0]
@@ -320,20 +321,18 @@ class Deliberation(CognitiveProcess):
     def initialize_buffer(self):
         self.get_logger().info("Initializing episodic buffer...")
         self.current_episode.perception = self.read_perceptions()
-        self.node.episodic_buffer.semaphore.acquire()
-        if (not self.node.episodic_buffer.input_labels and self.node.episodic_buffer.inputs) or (not self.node.episodic_buffer.output_labels and self.node.episodic_buffer.outputs):
-            self.node.episodic_buffer.configure_labels(self.current_episode)
-        self.node.episodic_buffer.semaphore.release()
+        with self.node.episodic_buffer.semaphore:
+            if (not self.node.episodic_buffer.input_labels and self.node.episodic_buffer.inputs) or (not self.node.episodic_buffer.output_labels and self.node.episodic_buffer.outputs):
+                self.node.episodic_buffer.configure_labels(self.current_episode)
 
     def deliberation_cycle(self):
         self.start_flag.wait()
 
         self.get_logger().info("Deliberation process started")
-        self.current_world = self.get_current_world_model()
         self.current_episode.perception = self.read_perceptions()
         self.summary_episode.old_perception = self.current_episode.perception
-        self.current_episode.domain_name = self.current_world if self.current_world else ""
         self.update_activations()
+        self.update_current_world()
         self.summary_episode.old_ltm_state = deepcopy(self.LTM_cache)
         self.active_goals = self.get_goals(self.LTM_cache)
         reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
@@ -349,6 +348,7 @@ class Deliberation(CognitiveProcess):
                     "*** DELIBERATION STEP: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.update_activations()
+                self.update_current_world()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 # GENERATE POSSIBLE ACTIONS
                 candidates = self.generate_candidate_actions(self.current_episode.perception, self.candidate_generation)
@@ -384,9 +384,17 @@ class Deliberation(CognitiveProcess):
             self.node.episodic_buffer.add_antitrace()
         if not self.exploration_process:
             self.update_ltm(self.summary_episode)
-        self.finished_flag.set()
-        self.start_flag.clear()
-    
+        self.node.after_deliberation()
+        self.finish_cycle()
+
+    def update_current_world(self):
+        """
+        Selects the world model. It must be called after update_activations, which applies the changes
+        of the LTM: while the process waits to start a cycle, new world models may have been created.
+        """
+        self.current_world = self.get_current_world_model()
+        self.current_episode.domain_name = self.current_world if self.current_world else ""
+
 
     def run(self):
         self.initialize_buffer()
@@ -396,9 +404,8 @@ class Deliberation(CognitiveProcess):
             except Exception as e:
                 self.get_logger().error(f"Exception in deliberation cycle: {e}")
                 self.get_logger().error(traceback.format_exc())
-                self.finished_flag.set()
-                self.start_flag.clear()
-                break
+                # The process goes on: the callback waiting for this cycle and the next ones must not wait forever
+                self.finish_cycle()
 
 
 

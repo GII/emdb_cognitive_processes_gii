@@ -6,6 +6,7 @@ import yaml
 
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.task import Future
 from rclpy.time import Time
 from rclpy.logging import LoggingSeverity
 
@@ -60,6 +61,8 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         self.ready_lock = threading.Lock()  # Protects ready_callbacks and the change of ready
         self.ready_callbacks = []  # (node, callback) pairs to schedule when the process is ready (see call_when_ready)
         self.loop_thread = None  # Process thread, started after the constructor (see StartsAfterConstruction)
+        self.start_flag = threading.Event()  # Set to start a cycle in the processes that run on request (see run_cycle)
+        self.cycle_waiter = None  # (node, future) of the callback waiting for the current cycle (see run_cycle)
 
         # --- LTM and STM ---
         self.current_episode = Episode()
@@ -167,6 +170,31 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
                 self.ready_callbacks.append((node, callback))
                 return
         node.executor.create_task(callback)
+
+    async def run_cycle(self, node):
+        """
+        Asks the process thread to run a cycle and suspends the calling callback until it finishes.
+        The executor of the node goes on with other callbacks meanwhile, so the cycle can need
+        services and activations of nodes that share that executor.
+
+        :param node: Node whose callback waits for the cycle. It must already be spinning in an executor.
+        :type node: rclpy.node.Node
+        """
+        finished = Future()
+        self.cycle_waiter = (node, finished)
+        self.start_flag.set()
+        await finished
+
+    def finish_cycle(self):
+        """
+        Wakes up the callback waiting for the current cycle (see run_cycle). To be called from the
+        process thread, as the last step of the cycle, also if it failed.
+        """
+        self.start_flag.clear()
+        waiter, self.cycle_waiter = self.cycle_waiter, None
+        if waiter is not None:
+            node, finished = waiter
+            node.executor.create_task(lambda: finished.set_result(True))
 
     def setup(self):
         """
