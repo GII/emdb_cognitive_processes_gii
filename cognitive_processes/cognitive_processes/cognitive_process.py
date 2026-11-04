@@ -31,6 +31,12 @@ class StartsAfterConstruction(type):
     they don't have to start the thread themselves.
     """
     def __call__(cls, *args, **kwargs):
+        """
+        Creates the process and starts its thread.
+
+        :return: The process.
+        :rtype: CognitiveProcess
+        """
         process = super().__call__(*args, **kwargs)  # Runs the whole chain of constructors
         process.start_process_thread()
         return process
@@ -45,7 +51,20 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
     """
     def __init__(self, name, iterations = 0, trials = 1, LTM_id="", **params):
         """
-        Constructor of the CognitiveProcess class.
+        Constructor of the CognitiveProcess class. The process thread starts when the object has been fully
+        constructed (see StartsAfterConstruction), so the constructor must not wait for anything from it.
+
+        :param name: Name of the process, which is also the name of its node.
+        :type name: str
+        :param iterations: Number of iterations of the process, defaults to 0.
+        :type iterations: int
+        :param trials: Number of trials before resetting the world, defaults to 1.
+        :type trials: int
+        :param LTM_id: Identifier of the LTM, e.g. "ltm_0".
+        :type LTM_id: str
+        :param params: Other parameters, which become attributes of the process (see set_attributes_from_params),
+            e.g. Control, Connectors and globals from the configuration file.
+        :type params: dict
         """
         super().__init__(name)
         self.name = name
@@ -114,6 +133,12 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
     # =========================
 
     def set_attributes_from_params(self, params):
+        """
+        Sets each parameter as an attribute of the process.
+
+        :param params: Name and value of each parameter.
+        :type params: dict
+        """
         for key, value in params.items():
             self.get_logger().debug("Setting atribute: " + str(key) + " with value: " + str(value))
             setattr(self, key, value)
@@ -198,7 +223,7 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
 
     def setup(self):
         """
-        Initial configuration of the MainLoop node.
+        Initial configuration of the process, which runs in the process thread.
         This method sets up the LTM, perceptions, files, connectors, control channel, etc.
         """
         self.random_seed = resolve_seed(self.random_seed)
@@ -374,8 +399,8 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         :type perception: core.container.Container
         :param policy: The policy to execute.
         :type policy: str
-        :return: The response from executing the policy.
-        :rtype: The executed policy.
+        :return: The name of the executed policy and the episode in the response of the policy.
+        :rtype: tuple[str, core_interfaces.msg.Container]
         """
         service_name = "policy/" + str(policy) + "/execute"
         perc_msg=perception.to_msg()
@@ -497,9 +522,11 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         Return false if all perceptions have the same value as the previous step. True otherwise.
 
         :param sensing: Sensing in the current iteration.
-        :type sensing: dict
+        :type sensing: core.container.Container
         :param old_sensing: Sensing in the last iteration.
-        :type old_sensing: dict
+        :type old_sensing: core.container.Container
+        :param threshold: Minimum difference for a value to be considered changed, defaults to 0.01.
+        :type threshold: float
         :return: Boolean that indicates if there is a sensorial change.
         :rtype: bool
         """
@@ -682,6 +709,9 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
     def update_ltm(self, stm:Episode):
         """
         Placeholder method to update the LTM with the current STM data.
+
+        :param stm: Episode with the information to update the LTM.
+        :type stm: cognitive_nodes.episode.Episode
         """
         raise NotImplementedError("This method should be implemented in the derived class.")
     
@@ -1287,11 +1317,11 @@ class CognitiveProcess(Node, metaclass=StartsAfterConstruction):
         Callback function to handle pause requests for the cognitive process.
 
         :param request: The incoming request to pause the process.
-        :type request: cognitive_node_interfaces.srv.Pause.Request
+        :type request: cognitive_processes_interfaces.srv.Pause.Request
         :param response: The response object to be filled and returned.
-        :type response: cognitive_node_interfaces.srv.Pause.Response
+        :type response: cognitive_processes_interfaces.srv.Pause.Response
         :return: The response indicating whether the process was paused successfully.
-        :rtype: cognitive_node_interfaces.srv.Pause.Response
+        :rtype: cognitive_processes_interfaces.srv.Pause.Response
         """
         self.paused = request.pause
         self.stop = request.stop

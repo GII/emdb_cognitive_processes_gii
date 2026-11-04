@@ -38,13 +38,20 @@ class MainLoop(CognitiveProcess):
     # =========================
     def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
         """
-        Constructor for the MainLoop class.
-        Initializes the MainLoop node and starts the main loop execution.
+        Constructor for the MainLoop class. The main loop starts in the process thread after the
+        constructor (see cognitive_processes.cognitive_process.StartsAfterConstruction).
 
-        :param node: The ROS2 Node instance.
-        :type node: rclpy.node.Node
         :param name: The name of the MainLoop node.
         :type name: str
+        :param softmax_selection: Select policies with a softmax function instead of the maximum activation,
+            defaults to False.
+        :type softmax_selection: bool
+        :param softmax_temperature: Temperature of the softmax function, defaults to 1.
+        :type softmax_temperature: float
+        :param kill_on_finish: Stop the whole system when the experiment finishes, defaults to False.
+        :type kill_on_finish: bool
+        :param params: Other parameters of the process (see CognitiveProcess).
+        :type params: dict
         """
         super().__init__(name, **params)
         
@@ -104,6 +111,10 @@ class MainLoop(CognitiveProcess):
         self.kill_commander_client = self.own_client(StopExecution, 'commander/kill')
 
     def setup_control_channel(self):
+        """
+        Configures the control channel and subscribes to the episodes topic, where the policies and other
+        processes also publish.
+        """
         super().setup_control_channel()
         episodes_msg=self.Control["episodes_msg"]
         episodes_topic=self.Control["episodes_topic"]
@@ -383,7 +394,7 @@ class MainLoop(CognitiveProcess):
         This method updates the LTM with the perception changes, policy executed and reward obtained.
 
         :param stm: Episode object containing the information to update the LTM.
-        :type stm: cognitive_processes.main_loop.Episode
+        :type stm: cognitive_nodes.episode.Episode
         """
         self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.parent_policy, copy(stm.reward_list), stm.old_ltm_state)
 
@@ -498,6 +509,20 @@ class MainLoop(CognitiveProcess):
             self.get_logger().info("No update required in PNode/CNodes")
 
     def add_point(self, name, sensing, node_type="pnode", confidence=1.0):
+        """
+        Adds a point to the specified node and, in a P-Node, records it as a success.
+
+        :param name: Name of the node to which the point is added.
+        :type name: str
+        :param sensing: Sensing data to be used for the point.
+        :type sensing: core.container.Container
+        :param node_type: Type of the node, defaults to "pnode".
+        :type node_type: str
+        :param confidence: Confidence of the point, defaults to 1.0.
+        :type confidence: float
+        :return: The response of the node, or False if there is no name.
+        :rtype: bool
+        """
         if not name:
             self.get_logger().warning("add_point called with empty name, skipping...")
             return False
@@ -507,17 +532,23 @@ class MainLoop(CognitiveProcess):
         return response
     
     def add_antipoint(self, name, sensing, node_type="pnode", confidence=1.0):
-        if not name:
-            self.get_logger().warning("add_antipoint called with empty name, skipping...")
-            return False
         """
         Adds an antipoint to the specified PNode.
 
         :param name: Name of the PNode to which the antipoint is added.
         :type name: str
         :param sensing: Sensing data to be used for the antipoint.
-        :type sensing: dict
+        :type sensing: core.container.Container
+        :param node_type: Type of the node, defaults to "pnode".
+        :type node_type: str
+        :param confidence: Confidence of the antipoint, defaults to 1.0.
+        :type confidence: float
+        :return: The response of the node, or False if there is no name.
+        :rtype: bool
         """
+        if not name:
+            self.get_logger().warning("add_antipoint called with empty name, skipping...")
+            return False
         response = super().add_antipoint(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = False
@@ -599,9 +630,14 @@ class MainLoop(CognitiveProcess):
         Update the rewards based on the old and new perceptions.
 
         :param old_perception: The perception before the action.
-        :type old_perception: dict
+        :type old_perception: core.container.Container
         :param perception: The perception after the action.
-        :type perception: dict
+        :type perception: core.container.Container
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :param write_current_episode: Update the spaces of the goals and write the rewards in the current
+            episode, defaults to True.
+        :type write_current_episode: bool
         """
         self.active_goals = self.get_goals(ltm_cache)
         update_space = write_current_episode
@@ -614,7 +650,8 @@ class MainLoop(CognitiveProcess):
     # =========================
     def run(self):
         """
-        Run the main loop of the system.
+        Run the main loop of the system, in the process thread. If the environment variable EMDB_PERF_FILE contains
+        a path, the wall-clock time at the end of each iteration is recorded in that file.
         """
 
         self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
@@ -692,11 +729,13 @@ class MainLoopLight(MainLoop):
 
     def __init__(self, name, **params):
         """
-        Constructor for the MainLoopLight class.
-        Initializes the MainLoopLight node and starts the main loop execution.
+        Constructor for the MainLoopLight class. The main loop starts in the process thread after the
+        constructor (see cognitive_processes.cognitive_process.StartsAfterConstruction).
 
-        :param node: The ROS2 Node instance.
-        :type node: rclpy.node.Node
+        :param name: The name of the node.
+        :type name: str
+        :param params: Other parameters (see MainLoop).
+        :type params: dict
         """
         super().__init__(name, **params)
 
