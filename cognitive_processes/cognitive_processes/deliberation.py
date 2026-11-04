@@ -15,7 +15,33 @@ class Deliberation(CognitiveProcess):
     """
     def __init__(self, name, node, iterations=0, trials=1, LTM_id="", candidate_actions=5, softmax_selection = True, softmax_temperature=1.0, candidate_generation="latin", exploration_process=False, **params):
         """
-        Constructor of the Deliberation class.
+        Constructor of the Deliberation class. The process thread starts after the constructor, and each cycle is
+        requested through run_cycle.
+
+        :param name: Name of the process.
+        :type name: str
+        :param node: The parent node, usually a Utility Model. It provides the episodic buffer and the utility predictions.
+        :type node: cognitive_nodes.utility_model.UtilityModel
+        :param iterations: Maximum number of steps of each deliberation cycle, defaults to 0.
+        :type iterations: int
+        :param trials: Number of trials, defaults to 1.
+        :type trials: int
+        :param LTM_id: Identifier of the LTM.
+        :type LTM_id: str
+        :param candidate_actions: Number of candidate actions per state, defaults to 5.
+        :type candidate_actions: int
+        :param softmax_selection: Select the action with a softmax function over its utility instead of the maximum,
+            defaults to True.
+        :type softmax_selection: bool
+        :param softmax_temperature: Temperature of the softmax function, defaults to 1.0.
+        :type softmax_temperature: float
+        :param candidate_generation: How candidates are generated: "latin" (Latin hypercube) or "random", defaults to "latin".
+        :type candidate_generation: str
+        :param exploration_process: The process is used for exploration: it considers the rewards of all the goals,
+            and it doesn't update the LTM, defaults to False.
+        :type exploration_process: bool
+        :param params: Other parameters of the process (see CognitiveProcess).
+        :type params: dict
         """
         super().__init__(name, iterations, trials, LTM_id, **params)
         self.node = node
@@ -34,10 +60,18 @@ class Deliberation(CognitiveProcess):
         self.set_attributes_from_params(params)
 
     def setup(self):
+        """
+        Initial configuration of the process, including the actuation.
+        """
         super().setup()
         self.configure_actuation()
 
     def configure_actuation(self):
+        """
+        Configures the actuation labels and the action sampler from the globals of the configuration file.
+
+        :raises ValueError: If actuation_config is not in the globals.
+        """
         self.get_logger().info(f"Configuring actuation: {self.globals}")
         self.actuation_config = self.globals.get("actuation_config", None)
         self.actuation_dims = 0
@@ -67,8 +101,16 @@ class Deliberation(CognitiveProcess):
 
     def generate_candidate_actions(self, states: Container = None, algorithm = "latin") -> Episode:
         """
-        Generates a list of candidate Episode objects based on the configured actuation dimensions.
-        Each Episode will have its old_perception set to the argument and action.actuation set to the candidate action.
+        Generates the candidate actions based on the configured actuation dimensions, in one Episode with a row per
+        candidate. Each state is repeated once per candidate action in old_perception, and the same set of actions is used for all states.
+
+        :param states: The current states.
+        :type states: core.container.Container
+        :param algorithm: How candidates are generated: "latin" (Latin hypercube) or "random", defaults to "latin".
+        :type algorithm: str
+        :return: The candidates, in the action and old_perception fields of the episode.
+        :rtype: cognitive_nodes.episode.Episode
+        :raises ValueError: If the algorithm is not known.
         """
         # Total candidates will be candidate_actions * number of states, but only one set of possible actions will be generated 
         n_states = len(states) 
@@ -103,14 +145,15 @@ class Deliberation(CognitiveProcess):
     
     def predict_perceptions(self, world_model, input_episodes: Episode) -> Episode:
         """
-        Predicts the expected utilities for the given input episodes using the Utility Model.
-        
-        :param world_model: The current world model.
-        :type world_model: dict
-        :param input_episodes: List of input episodes to predict utilities for.
-        :type input_episodes: list[Episode]
-        :return: List of predicted utilities.
-        :rtype: list[float]
+        Predicts the perceptions that follow the given input episodes, using the current World Model. Without a
+        world model, the perception is not expected to change.
+
+        :param world_model: Name of the current world model, or None if there is none.
+        :type world_model: str or None
+        :param input_episodes: Episode with the candidates, one per row.
+        :type input_episodes: cognitive_nodes.episode.Episode
+        :return: Episode with the predicted perceptions.
+        :rtype: cognitive_nodes.episode.Episode
         """
         if world_model is None:
             # There is no world model yet (e.g. they are created during the experiment): the perception is not expected to change
@@ -125,8 +168,8 @@ class Deliberation(CognitiveProcess):
         """
         Predicts the expected utilities for the given input episodes using the Utility Model.
         
-        :param input_episodes: List of input episodes to predict utilities for.
-        :type input_episodes: list[Episode]
+        :param input_episodes: Episode with the candidates, one per row.
+        :type input_episodes: cognitive_nodes.episode.Episode
         :return: List of predicted utilities.
         :rtype: list[float]
         """
@@ -134,7 +177,17 @@ class Deliberation(CognitiveProcess):
     
     def select_action(self, candidate_actions: Container, predicted_perceptions: Episode, expected_utilities):
         """
-        Selects an action probabilistically using softmax over the expected utilities.
+        Selects an action using softmax over the expected utilities, or the one with the maximum utility if
+        softmax_selection is False.
+
+        :param candidate_actions: The candidate actions.
+        :type candidate_actions: core.container.Container
+        :param predicted_perceptions: Episode with the predicted perceptions of the candidates.
+        :type predicted_perceptions: cognitive_nodes.episode.Episode
+        :param expected_utilities: Expected utility of each candidate.
+        :type expected_utilities: list[float]
+        :return: Container whose only sample is the selected action.
+        :rtype: core.container.Container
         """
         softmax = getattr(self, "softmax_selection", True)
         if softmax:
@@ -156,6 +209,9 @@ class Deliberation(CognitiveProcess):
         return self.action_container
     
     def publish_episode(self):
+        """
+        Publishes the current episode and adds it to the episodic buffer of the parent node.
+        """
         super().publish_episode()
         self.node.episodic_buffer.add_episode(self.current_episode, self.current_reward)
 
@@ -175,7 +231,7 @@ class Deliberation(CognitiveProcess):
     
     def get_linked_world_model(self):
         """
-        Retrieves the goal linked to the parent node of the process
+        Retrieves the world model linked to the parent node of the process
         """
         cnodes = [neighbor["name"] for neighbor in self.node.neighbors if neighbor["node_type"] == "CNode"]
         self.get_logger().info(f"Linked CNodes: {cnodes}")
@@ -188,6 +244,13 @@ class Deliberation(CognitiveProcess):
         return linked_goals
 
     def check_completion(self):
+        """
+        Checks whether a linked goal has been reached (all the goals with an exploration process), and stores the
+        maximum reward of those goals in current_reward.
+
+        :return: True if any reward exceeds reward_threshold.
+        :rtype: bool
+        """
         self.get_logger().info("Checking if goals are completed")
         if not self.exploration_process:
             linked_goals = self.get_linked_goals()
@@ -208,7 +271,7 @@ class Deliberation(CognitiveProcess):
         This method updates the LTM with the perception changes, policy executed and reward obtained.
 
         :param stm: Episode object containing the information to update the LTM.
-        :type stm: cognitive_processes.main_loop.Episode
+        :type stm: cognitive_nodes.episode.Episode
         """
         if not self.exploration_process:
             self.update_pnodes_reward_basis(copy(stm.reward_list), stm.old_ltm_state)
@@ -303,22 +366,61 @@ class Deliberation(CognitiveProcess):
             self.get_logger().info("No update required in PNode/CNodes")
 
     def add_pnode_trace(self, pnode: str, trace: Episode, confidence: float = 1.0):
+        """
+        Adds the perceptions of a trace to a P-Node as points.
+
+        :param pnode: Name of the P-Node.
+        :type pnode: str
+        :param trace: The trace.
+        :type trace: cognitive_nodes.episode.Episode
+        :param confidence: Confidence of the points, defaults to 1.0.
+        :type confidence: float
+        :return: True if the P-Node added them.
+        :rtype: bool
+        """
         confidences = np.full(len(trace), confidence)
         added = self.add_pnode_points(pnode, trace, confidences)
         return added
 
     def add_pnode_antitrace(self, pnode: str, antitrace: Episode, confidence: float = 1.0):
+        """
+        Adds the perceptions of a trace to a P-Node as anti-points (negative confidence).
+
+        :param pnode: Name of the P-Node.
+        :type pnode: str
+        :param antitrace: The trace.
+        :type antitrace: cognitive_nodes.episode.Episode
+        :param confidence: Absolute value of the confidence of the anti-points, defaults to 1.0.
+        :type confidence: float
+        :return: True if the P-Node added them.
+        :rtype: bool
+        """
         confidences = np.full(len(antitrace), -confidence)
         added = self.add_pnode_points(pnode, antitrace, confidences)
         return added
 
     def add_pnode_points(self, pnode: str, trace: Episode, confidences: np.ndarray):
+        """
+        Adds the perceptions of a trace to a P-Node, in the process thread.
+
+        :param pnode: Name of the P-Node.
+        :type pnode: str
+        :param trace: The trace.
+        :type trace: cognitive_nodes.episode.Episode
+        :param confidences: Confidence of each point.
+        :type confidences: numpy.ndarray
+        :return: True if the P-Node added them.
+        :rtype: bool
+        """
         service_name = "pnode/" + str(pnode) + "/add_points"
         points = trace.perception # TODO: Remove the last element of this container, shouldn't be included as part of the trace data
         response = self.call_services([(self.own_client(AddPoints, service_name), AddPoints.Request(points=points.to_msg(), confidences=confidences.tolist()))])[0]
         return response.added
     
     def initialize_buffer(self):
+        """
+        Reads the perceptions and configures the labels of the episodic buffer of the parent node if needed.
+        """
         self.get_logger().info("Initializing episodic buffer...")
         self.current_episode.perception = self.read_perceptions()
         with self.node.episodic_buffer.semaphore:
@@ -326,6 +428,12 @@ class Deliberation(CognitiveProcess):
                 self.node.episodic_buffer.configure_labels(self.current_episode)
 
     def deliberation_cycle(self):
+        """
+        Runs one deliberation cycle, once run_cycle requests it: in each step it generates candidate actions, predicts
+        their perceptions and utilities, selects and executes an action, and checks the rewards, until a linked goal is
+        reached or iterations is exceeded. At the end it updates the LTM (unless it is an exploration process) and calls
+        finish_cycle.
+        """
         self.start_flag.wait()
 
         self.get_logger().info("Deliberation process started")
@@ -397,6 +505,10 @@ class Deliberation(CognitiveProcess):
 
 
     def run(self):
+        """
+        Loop of the process thread: runs deliberation cycles. An exception in a cycle is logged and finishes that cycle, so
+        the callback waiting for it doesn't wait forever.
+        """
         self.initialize_buffer()
         while True:
             try:
