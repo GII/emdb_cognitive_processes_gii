@@ -1,4 +1,3 @@
-import threading
 import traceback
 from copy import deepcopy
 
@@ -16,14 +15,12 @@ class Reaction(CognitiveProcess):
     SAC model stored in its parent ``PolicyLearned`` node to obtain the next
     action at each step.
 
-    The process is decoupled from the ``PolicyLearned`` node via a
-    ``start_flag`` / ``finished_flag`` threading event pair, identical to the
-    ``Deliberation`` <=> ``UtilityModel`` pattern:
+    The process is decoupled from the ``PolicyLearned`` node as in the
+    ``Deliberation`` <=> ``UtilityModel`` pattern (see ``CognitiveProcess.run_cycle``):
 
-    * ``PolicyLearned.execute_callback`` -> sets ``start_flag``, waits on
-      ``finished_flag``.
+    * ``PolicyLearned.execute_callback`` -> awaits ``run_cycle``.
     * ``Reaction.reaction_cycle`` -> waits on ``start_flag``, runs the loop,
-      sets ``finished_flag``.
+      calls ``finish_cycle``.
 
     The ``summary_episode`` attribute holds the result of the last completed
     cycle and is read by ``PolicyLearned.execute_callback`` to build its
@@ -64,9 +61,6 @@ class Reaction(CognitiveProcess):
         self.reward_threshold = reward_threshold
         self.current_reward = 0.0
 
-        self.start_flag = threading.Event()
-        self.finished_flag = threading.Event()
-
         self.summary_episode = Episode()
         self.summary_episode.parent_policy = self.node.name
 
@@ -86,10 +80,10 @@ class Reaction(CognitiveProcess):
     def skipped_activation_inputs(self):
         """Do not wait for the parent policy node's activation.
 
-        The parent ``PolicyLearned`` node is blocked in ``execute_callback``
-        waiting for ``finished_flag``, so it cannot publish its activation
-        (mirroring ``Deliberation.skipped_activation_inputs``). Waiting for it
-        would be a deadlock.
+        The parent ``PolicyLearned`` node may not publish its activation while
+        its ``execute_callback`` waits for the cycle (mirroring
+        ``Deliberation.skipped_activation_inputs``). Waiting for it would be a
+        deadlock.
         """
         return {self.node.name}
 
@@ -148,7 +142,7 @@ class Reaction(CognitiveProcess):
         """Run one closed-loop reaction cycle.
 
         Waits for ``start_flag``, executes up to ``self.iterations`` steps
-        using the SAC model in ``self.node``, then sets ``finished_flag``.
+        using the SAC model in ``self.node``, then calls ``finish_cycle``.
         """
         self.start_flag.wait()
 
@@ -229,8 +223,7 @@ class Reaction(CognitiveProcess):
             f"(steps={step}, achieved={achieved})"
         )
 
-        self.finished_flag.set()
-        self.start_flag.clear()
+        self.finish_cycle()
 
     # ------------------------------------------------------------------
     # Thread entry-point
@@ -246,6 +239,5 @@ class Reaction(CognitiveProcess):
                 self.get_logger().error(
                     f"Exception in reaction cycle: {exc}\n{traceback.format_exc()}"
                 )
-                self.finished_flag.set()
-                self.start_flag.clear()
-                break
+                # The process goes on: the callback waiting for this cycle and the next ones must not wait forever
+                self.finish_cycle()
