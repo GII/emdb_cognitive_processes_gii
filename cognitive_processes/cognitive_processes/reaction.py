@@ -56,6 +56,9 @@ class Reaction(CognitiveProcess):
         reward_threshold=0.1,
         **params,
     ):
+        """
+        Constructor of the Reaction class. The parameters are described in the documentation of the class.
+        """
         super().__init__(name, iterations, trials, LTM_id, **params)
         self.node = node
         self.reward_threshold = reward_threshold
@@ -71,6 +74,9 @@ class Reaction(CognitiveProcess):
     # ------------------------------------------------------------------
 
     def setup(self):
+        """
+        Initial configuration of the process.
+        """
         super().setup()
 
     # ------------------------------------------------------------------
