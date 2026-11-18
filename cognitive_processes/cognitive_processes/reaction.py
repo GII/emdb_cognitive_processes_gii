@@ -1,7 +1,7 @@
 import traceback
 from copy import deepcopy
 
-from cognitive_nodes.episode import Episode, Action
+from cognitive_nodes.episode import Episode
 from cognitive_processes.cognitive_process import CognitiveProcess
 
 
@@ -153,6 +153,10 @@ class Reaction(CognitiveProcess):
         self.start_flag.wait()
 
         self.get_logger().info(f"Reaction cycle started for {self.get_name()}")
+        # Fresh summary per cycle: a failed or empty cycle must not return the previous result
+        self.summary_episode = Episode(parent_policy=self.node.name)
+        self.current_world = self.get_current_world_model()
+        self.current_episode.domain_name = self.current_world if self.current_world else ""
         # Read initial perception and snapshot LTM / goals
         self.current_episode.perception = self.read_perceptions()
         self.summary_episode.old_perception = self.current_episode.perception
@@ -162,6 +166,7 @@ class Reaction(CognitiveProcess):
 
         achieved = False
         step = 0
+        executed = 0
 
         while step < self.iterations and not self.stop and not achieved:
             if self.paused:
@@ -184,17 +189,14 @@ class Reaction(CognitiveProcess):
                 f'action=[{", ".join(f"{v:.4f}" for v in action_vec)}]'
             )
 
-            # Pack the action into an Action object
-            actuation = self.node._action_vec_to_dict(action_vec)
-            self.current_episode.action = Action(
-                actuation=actuation, policy_id=0
+            # Pack the action into a Container (normalized to [0, 1], like the Deliberation candidates)
+            self.current_episode.action = self.node._action_vec_to_container(
+                action_vec, self.get_clock().now().nanoseconds / 1e9
             )
             self.current_episode.parent_policy = self.node.name
 
             # Execute the action
-            self.execute_action(
-                self.current_episode.perception, self.current_episode.action
-            )
+            self.execute_action(self.current_episode.action)
 
             # Read the resulting perception
             (
@@ -204,11 +206,12 @@ class Reaction(CognitiveProcess):
 
             # Obtain rewards from all active Goal nodes
             self.active_goals = self.get_linked_goals()
-            self.current_episode.reward_list = self.get_goals_reward(
+            reward_dict = self.get_goals_reward(
                 self.current_episode.old_perception,
                 self.current_episode.perception,
                 self.LTM_cache,
             )
+            self.current_episode.update_reward(reward_dict, self.get_clock().now())
 
             # Publish episode and check for goal completion
             self.publish_episode()
@@ -219,10 +222,16 @@ class Reaction(CognitiveProcess):
                 f"reward={self.current_reward:.3f} achieved={achieved}"
             )
             step += 1
+            executed += 1
 
         # Propagate final state to the summary episode read by PolicyLearned
-        self.summary_episode.perception = self.current_episode.perception
-        self.summary_episode.reward_list = self.current_episode.reward_list
+        # (same fields as Deliberation: MainLoopLight copies the action into its episodes)
+        self.summary_episode.domain_name = self.current_episode.domain_name
+        if executed:
+            self.summary_episode.perception = self.current_episode.perception
+            self.summary_episode.action = self.current_episode.action
+            if self.current_episode.rewards is not None:
+                self.summary_episode.rewards = self.current_episode.rewards
 
         self.get_logger().info(
             f"Reaction cycle finished for {self.get_name()} "

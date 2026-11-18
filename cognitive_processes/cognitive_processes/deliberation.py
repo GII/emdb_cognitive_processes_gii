@@ -89,7 +89,10 @@ class Deliberation(CognitiveProcess):
             self.get_logger().info(
                 f"Actuation configuration {self.actuation_config} loaded with {self.actuation_dims} dimensions."
             )
-        self.action_sampler = LatinHypercube(d=self.actuation_dims, rng=self.rng)
+        try:
+            self.action_sampler = LatinHypercube(d=self.actuation_dims, rng=self.rng)
+        except TypeError:  # SciPy < 1.15 (e.g. Ubuntu 24.04's 1.11) calls this argument seed; same Generator
+            self.action_sampler = LatinHypercube(d=self.actuation_dims, seed=self.rng)
 
     def skipped_activation_inputs(self):
         """
