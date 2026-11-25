@@ -36,7 +36,7 @@ class MainLoop(CognitiveProcess):
     # =========================
     # INITIALIZATION & SETUP
     # =========================
-    def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
+    def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, pnode_threshold = 0.05, **params):
         """
         Constructor for the MainLoop class. The main loop starts in the process thread after the
         constructor (see cognitive_processes.cognitive_process.StartsAfterConstruction).
@@ -50,6 +50,8 @@ class MainLoop(CognitiveProcess):
         :type softmax_temperature: float
         :param kill_on_finish: Stop the whole system when the experiment finishes, defaults to False.
         :type kill_on_finish: bool
+        :param pnode_threshold: Threshold for the policy nodes, defaults to 0.05.
+        :type pnode_threshold: float
         :param params: Other parameters of the process (see CognitiveProcess).
         :type params: dict
         """
@@ -63,6 +65,7 @@ class MainLoop(CognitiveProcess):
         self.current_reward = 0
         self.softmax_selection = softmax_selection
         self.softmax_temperature = softmax_temperature
+        self.pnode_threshold = pnode_threshold
 
         # --- Node/goal/drive management ---
         self.n_cnodes = 0
@@ -481,9 +484,9 @@ class MainLoop(CognitiveProcess):
                         self.add_point(pnode, old_perception)
                         updates = True
                         point_added = True
-                        if pnode_activation > threshold:
+                        if pnode_activation > self.pnode_threshold:
                             self.log_cnode_execution(cnode, True)
-                elif pnode_activation > threshold:
+                elif pnode_activation > self.pnode_threshold:
                     self.add_antipoint(pnode, old_perception)
                     if not point_added:
                         self.log_cnode_execution(cnode, False)
