@@ -789,7 +789,8 @@ class MainLoopLight(MainLoop):
 
     def run(self):
         """
-        Run the main loop of the system.
+        Run the main loop of the system. If the environment variable EMDB_PERF_FILE contains a path, the wall-clock
+        time at the end of each iteration is recorded in that file, as in MainLoop.run.
         """
 
         self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
@@ -799,6 +800,9 @@ class MainLoopLight(MainLoop):
         self.current_episode.perception = self.read_perceptions()
         self.update_activations()
         self.iteration = 1
+        # PERF: EMDB_PERF_FILE=<path> records the wall-clock time at the end of each iteration (as in MainLoop.run).
+        perf_path = os.environ.get("EMDB_PERF_FILE")
+        perf_file = open(perf_path, "w", buffering=1) if perf_path else None
         
         while (self.iteration <= self.iterations) and (not self.stop):
 
@@ -846,8 +850,12 @@ class MainLoopLight(MainLoop):
                     )
                 )
                 self.update_status()
+                if perf_file:
+                    perf_file.write(f"{self.iteration} {time.time():.6f}\n")
                 self.iteration += 1
 
+        if perf_file:
+            perf_file.close()
         self.close_files()
         if self.kill_on_finish:
             self.call_services([(self.kill_commander_client, StopExecution.Request())])
