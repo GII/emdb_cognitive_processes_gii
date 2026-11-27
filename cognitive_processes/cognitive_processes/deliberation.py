@@ -1,15 +1,12 @@
 import numpy as np
-import threading
 import traceback
 from copy import deepcopy, copy
-
-from cognitive_nodes.episode import Episode, Action, episode_obj_list_to_msg_list, episode_msg_list_to_obj_list
 from scipy.stats.qmc import LatinHypercube
-from cognitive_processes.cognitive_process import CognitiveProcess
-from core.service_client import ServiceClient
 
+from cognitive_nodes.episode import Episode, episode_obj_to_msg, container_msg_to_episode, container_to_episode_obj
+from core.container import Container
+from cognitive_processes.cognitive_process import CognitiveProcess
 from cognitive_node_interfaces.srv import AddPoints, Predict
-from core.utils import perception_dict_to_msg
 
 
 class Deliberation(CognitiveProcess):
@@ -18,7 +15,33 @@ class Deliberation(CognitiveProcess):
     """
     def __init__(self, name, node, iterations=0, trials=1, LTM_id="", candidate_actions=5, softmax_selection = True, softmax_temperature=1.0, candidate_generation="latin", exploration_process=False, **params):
         """
-        Constructor of the Deliberation class.
+        Constructor of the Deliberation class. The process thread starts after the constructor, and each cycle is
+        requested through run_cycle.
+
+        :param name: Name of the process.
+        :type name: str
+        :param node: The parent node, usually a Utility Model. It provides the episodic buffer and the utility predictions.
+        :type node: cognitive_nodes.utility_model.UtilityModel
+        :param iterations: Maximum number of steps of each deliberation cycle, defaults to 0.
+        :type iterations: int
+        :param trials: Number of trials, defaults to 1.
+        :type trials: int
+        :param LTM_id: Identifier of the LTM.
+        :type LTM_id: str
+        :param candidate_actions: Number of candidate actions per state, defaults to 5.
+        :type candidate_actions: int
+        :param softmax_selection: Select the action with a softmax function over its utility instead of the maximum,
+            defaults to True.
+        :type softmax_selection: bool
+        :param softmax_temperature: Temperature of the softmax function, defaults to 1.0.
+        :type softmax_temperature: float
+        :param candidate_generation: How candidates are generated: "latin" (Latin hypercube) or "random", defaults to "latin".
+        :type candidate_generation: str
+        :param exploration_process: The process is used for exploration: it considers the rewards of all the goals,
+            and it doesn't update the LTM, defaults to False.
+        :type exploration_process: bool
+        :param params: Other parameters of the process (see CognitiveProcess).
+        :type params: dict
         """
         super().__init__(name, iterations, trials, LTM_id, **params)
         self.node = node
@@ -27,25 +50,28 @@ class Deliberation(CognitiveProcess):
         self.summary_episode = Episode()
         self.summary_episode.parent_policy = self.node.name
 
-        self.start_flag = threading.Event()
-        self.finished_flag = threading.Event()
-        
         self.softmax_selection = softmax_selection
         self.softmax_temperature = softmax_temperature
         self.candidate_generation = candidate_generation
         self.reward_threshold = 0.1
         self.current_reward = 0.0
         
-        # Read LTM and configure perceptions
+        # The process thread (setup and run) starts after the constructor
         self.set_attributes_from_params(params)
-        self.setup()
-        self.start_threading()
 
     def setup(self):
+        """
+        Initial configuration of the process, including the actuation.
+        """
         super().setup()
         self.configure_actuation()
 
     def configure_actuation(self):
+        """
+        Configures the actuation labels and the action sampler from the globals of the configuration file.
+
+        :raises ValueError: If actuation_config is not in the globals.
+        """
         self.get_logger().info(f"Configuring actuation: {self.globals}")
         self.actuation_config = self.globals.get("actuation_config", None)
         self.actuation_dims = 0
@@ -54,96 +80,117 @@ class Deliberation(CognitiveProcess):
                 "Actuation configuration not found in globals. Please ensure it is set correctly on the YAML file."
             )
         else:
-            self.actuation_dict = {}
+            self.actuation_labels = [] 
             for actuator in self.actuation_config:
-                self.actuation_dict[actuator] = [{}]
-                for param in self.actuation_config[actuator]:
-                    self.actuation_dict[actuator][0][param] = 0.0
-                self.actuation_dims += len(self.actuation_config[actuator])
+                self.actuation_labels.extend([f"{actuator}:{param}" for param in self.actuation_config[actuator]])
+            self.action_container = Container("action", max_size=1, container_type="action", labels=self.actuation_labels)
+            self.actuation_dims = len(self.action_container.feature_labels)
+
             self.get_logger().info(
                 f"Actuation configuration {self.actuation_config} loaded with {self.actuation_dims} dimensions."
             )
-        self.action_sampler = LatinHypercube(d=self.actuation_dims, rng=self.rng)
+        try:
+            self.action_sampler = LatinHypercube(d=self.actuation_dims, rng=self.rng)
+        except TypeError:  # SciPy < 1.15 (e.g. Ubuntu 24.04's 1.11) calls this argument seed; same Generator
+            self.action_sampler = LatinHypercube(d=self.actuation_dims, seed=self.rng)
 
-    def update_activations(self):
-            """
-            This method updates the activations of the nodes in the LTM cache.
-            """
-
-            self.get_logger().info("Updating activations...")
-            self.semaphore.acquire()
-            self.activation_time=self.get_clock().now().nanoseconds
-            for node in self.activation_inputs:
-                self.activation_inputs[node]['flag'].clear()
-
-            for node in self.activation_inputs:
-                if node == self.node.name:
-                    self.activation_inputs[node]['flag'].set()
-                self.get_logger().debug(f"DEBUG: Waiting for activation: {node}")
-                self.activation_inputs[node]['flag'].wait()
-                self.activation_inputs[node]['flag'].clear()
-            self.semaphore.release()
-            self.get_logger().debug("DEBUG - LTM CACHE:" + str(self.LTM_cache))
-
-    def generate_candidate_actions(self, old_perception=None, algorithm = "latin"):
+    def skipped_activation_inputs(self):
         """
-        Generates a list of candidate Episode objects based on the configured actuation dimensions.
-        Each Episode will have its old_perception set to the argument and action.actuation set to the candidate action.
+        The parent node may not publish its activation while the process runs (with the Python
+        executors, its execute callback keeps busy the callback group of its activation timer), so
+        its activation is not waited for (it would be a deadlock).
         """
+        return {self.node.name}
+
+    def generate_candidate_actions(self, states: Container = None, algorithm = "latin") -> Episode:
+        """
+        Generates the candidate actions based on the configured actuation dimensions, in one Episode with a row per
+        candidate. Each state is repeated once per candidate action in old_perception, and the same set of actions is used for all states.
+
+        :param states: The current states.
+        :type states: core.container.Container
+        :param algorithm: How candidates are generated: "latin" (Latin hypercube) or "random", defaults to "latin".
+        :type algorithm: str
+        :return: The candidates, in the action and old_perception fields of the episode.
+        :rtype: cognitive_nodes.episode.Episode
+        :raises ValueError: If the algorithm is not known.
+        """
+        # Total candidates will be candidate_actions * number of states, but only one set of possible actions will be generated 
+        n_states = len(states) 
+        n_candidates = self.candidate_actions * n_states
+               
         if algorithm == "latin":
             candidate_matrix = self.action_sampler.random(n=self.candidate_actions)
         elif algorithm == "random":
             candidate_matrix = self.rng.random((self.candidate_actions, self.actuation_dims))
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
-        action_list = [deepcopy(self.actuation_dict) for _ in range(self.candidate_actions)]
-        for i, action in enumerate(action_list):
-            offset = 0
-            for actuator, params in action.items():
-                for j, param in enumerate(params[0]):
-                    params[0][param] = candidate_matrix[i][j + offset]
-                offset += len(params[0])
-        # Create Episode objects for each candidate action
-        episodes = []
-        for i in range(self.candidate_actions):
-            action = Action(actuation=action_list[i])
-            episode = Episode(old_perception=old_perception, action=action)
-            episodes.append(episode)
-        self.get_logger().info(f"Generated {len(episodes)} candidate episodes")
-        return episodes
-    
-    def predict_perceptions(self, world_model, input_episodes: list[Episode]) -> list[Episode]:
-        """
-        Predicts the expected utilities for the given input episodes using the Utility Model.
         
-        :param world_model: The current world model.
-        :type world_model: dict
-        :param input_episodes: List of input episodes to predict utilities for.
-        :type input_episodes: list[Episode]
-        :return: List of predicted utilities.
-        :rtype: list[float]
+        
+        # Assign the candidate actions to the action container and create an episode for the candidates
+        timestamp = self.get_clock().now().nanoseconds / 1e9
+        timestamps = np.full((n_candidates,), timestamp)
+        tiled_candidate_matrix = np.tile(candidate_matrix, (n_states, 1))
+        
+        self.action_candidates_container = Container("action_candidates", max_size=n_candidates, container_type="action", labels=self.actuation_labels)
+        self.action_candidates_container.push(tiled_candidate_matrix, timestamps=timestamps)
+        candidates_episode = Episode()
+        candidates_episode.action = self.action_candidates_container
+
+        # Tile the old perception for each candidate action
+        old_perception_tile = Container("old_perception", max_size=n_candidates, container_type="perception", labels=states.feature_labels)
+        states_data = states.read().values
+        repeated_states = np.repeat(states_data, self.candidate_actions, axis=0)
+        old_perception_tile.push(repeated_states, timestamps=timestamps)
+        candidates_episode.old_perception = old_perception_tile
+        self.get_logger().info(f"Generated {n_candidates} candidate episodes. States: {n_states}, Candidates per state: {self.candidate_actions}")
+        return candidates_episode
+    
+    def predict_perceptions(self, world_model, input_episodes: Episode) -> Episode:
         """
+        Predicts the perceptions that follow the given input episodes, using the current World Model. Without a
+        world model, the perception is not expected to change.
+
+        :param world_model: Name of the current world model, or None if there is none.
+        :type world_model: str or None
+        :param input_episodes: Episode with the candidates, one per row.
+        :type input_episodes: cognitive_nodes.episode.Episode
+        :return: Episode with the predicted perceptions.
+        :rtype: cognitive_nodes.episode.Episode
+        """
+        if world_model is None:
+            # There is no world model yet (e.g. they are created during the experiment): the perception is not expected to change
+            self.get_logger().info("No world model to predict with, using the current perceptions")
+            return Episode(perception=input_episodes.old_perception)
         service_name = "world_model/" + str(world_model) + "/predict"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Predict, service_name)
         # Use the World Model's predict method to get the predicted states
-        predicted_episodes = self.node_clients[service_name].send_request(input_episodes=episode_obj_list_to_msg_list(input_episodes))
-        return episode_msg_list_to_obj_list(predicted_episodes.output_episodes)
+        predicted_episodes = self.call_services([(self.own_client(Predict, service_name), Predict.Request(input_episodes=episode_obj_to_msg(input_episodes)))])[0]
+        return container_msg_to_episode(predicted_episodes.output_episodes)
     
-    def predict_utilities(self, input_episodes: list[Episode]) -> list[float]:
+    def predict_utilities(self, input_episodes: Episode) -> list[float]:
         """
         Predicts the expected utilities for the given input episodes using the Utility Model.
         
-        :param input_episodes: List of input episodes to predict utilities for.
-        :type input_episodes: list[Episode]
+        :param input_episodes: Episode with the candidates, one per row.
+        :type input_episodes: cognitive_nodes.episode.Episode
         :return: List of predicted utilities.
         :rtype: list[float]
         """
         return self.node.predict(input_episodes)
     
-    def select_action(self, candidate_actions, predicted_episodes, expected_utilities):
+    def select_action(self, candidate_actions: Container, predicted_perceptions: Episode, expected_utilities):
         """
-        Selects an action probabilistically using softmax over the expected utilities.
+        Selects an action using softmax over the expected utilities, or the one with the maximum utility if
+        softmax_selection is False.
+
+        :param candidate_actions: The candidate actions.
+        :type candidate_actions: core.container.Container
+        :param predicted_perceptions: Episode with the predicted perceptions of the candidates.
+        :type predicted_perceptions: cognitive_nodes.episode.Episode
+        :param expected_utilities: Expected utility of each candidate.
+        :type expected_utilities: list[float]
+        :return: Container whose only sample is the selected action.
+        :rtype: core.container.Container
         """
         softmax = getattr(self, "softmax_selection", True)
         if softmax:
@@ -154,16 +201,20 @@ class Deliberation(CognitiveProcess):
             probs = exp_utilities / np.sum(exp_utilities)
             probs = probs.reshape(-1)
             # Sample an index according to the probabilities
-            selected_index = np.random.choice(len(candidate_actions), p=probs)
+            selected_index = self.rng.choice(len(candidate_actions), p=probs)
         else:
             selected_index = np.argmax(expected_utilities)
-        selected_action = candidate_actions[selected_index]
-        predicted_state = predicted_episodes[selected_index].perception
-        self.get_logger().info(f"Selected action: {selected_action.action} with utility {expected_utilities[selected_index]}")
+        selected_action = candidate_actions.read(selected_index).values
+        predicted_state = predicted_perceptions.perception.read(selected_index)
+        self.action_container.push(selected_action, timestamps=self.get_clock().now().nanoseconds / 1e9)
+        self.get_logger().info(f"Selected action: {selected_action} with utility {expected_utilities[selected_index]}")
         self.get_logger().info(f"Expected perception: {predicted_state}")
-        return selected_action.action
+        return self.action_container
     
     def publish_episode(self):
+        """
+        Publishes the current episode and adds it to the episodic buffer of the parent node.
+        """
         super().publish_episode()
         self.node.episodic_buffer.add_episode(self.current_episode, self.current_reward)
 
@@ -183,7 +234,7 @@ class Deliberation(CognitiveProcess):
     
     def get_linked_world_model(self):
         """
-        Retrieves the goal linked to the parent node of the process
+        Retrieves the world model linked to the parent node of the process
         """
         cnodes = [neighbor["name"] for neighbor in self.node.neighbors if neighbor["node_type"] == "CNode"]
         self.get_logger().info(f"Linked CNodes: {cnodes}")
@@ -196,6 +247,13 @@ class Deliberation(CognitiveProcess):
         return linked_goals
 
     def check_completion(self):
+        """
+        Checks whether a linked goal has been reached (all the goals with an exploration process), and stores the
+        maximum reward of those goals in current_reward.
+
+        :return: True if any reward exceeds reward_threshold.
+        :rtype: bool
+        """
         self.get_logger().info("Checking if goals are completed")
         if not self.exploration_process:
             linked_goals = self.get_linked_goals()
@@ -216,13 +274,13 @@ class Deliberation(CognitiveProcess):
         This method updates the LTM with the perception changes, policy executed and reward obtained.
 
         :param stm: Episode object containing the information to update the LTM.
-        :type stm: cognitive_processes.main_loop.Episode
+        :type stm: cognitive_nodes.episode.Episode
         """
         if not self.exploration_process:
-            self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.parent_policy, copy(stm.reward_list), stm.old_ltm_state)
+            self.update_pnodes_reward_basis(copy(stm.reward_list), stm.old_ltm_state)
 
 
-    def update_pnodes_reward_basis(self, old_perception, perception, policy, reward_list, ltm_cache):
+    def update_pnodes_reward_basis(self, reward_list, ltm_cache):
         """
         This method creates or updates CNodes and PNodes according to the executed policy,
         current goal and reward obtained.
@@ -238,12 +296,6 @@ class Deliberation(CognitiveProcess):
         -If there are no CNodes connected to the policy a new CNode is created
         if there is reward.
 
-        :param old_perception: Perception before the execution of the policy.
-        :type old_perception: dict
-        :param perception: Perception after the execution of the policy.
-        :type perception: dict
-        :param policy: Policy executed.
-        :type policy: str
         :param reward_list: Dictionary with the rewards obtained for each goal after the execution of the policy.
         :type reward_list: dict
         :param ltm_cache: LTM cache containing the nodes and their data.
@@ -292,12 +344,12 @@ class Deliberation(CognitiveProcess):
             if (reward > threshold):
                 reward_list.pop(goal)
                 if not point_added:
-                    trace = self.node.episodic_buffer.traces_buffer[-1]
+                    trace = container_to_episode_obj(self.node.episodic_buffer.traces_buffer.read_flattened(-1))
                     self.add_pnode_trace(pnode, trace)
                     updates = True
                     point_added = True
-            elif pnode_activation > threshold and len(self.node.episodic_buffer.antitraces_buffer) > 0:
-                antitrace = self.node.episodic_buffer.antitraces_buffer[-1]
+            elif pnode_activation > threshold and self.node.episodic_buffer.antitraces_buffer.n_traces > 0:
+                antitrace = container_to_episode_obj(self.node.episodic_buffer.antitraces_buffer.read_flattened(-1))
                 self.add_pnode_antitrace(pnode, antitrace)
                 updates = True
 
@@ -316,37 +368,86 @@ class Deliberation(CognitiveProcess):
         if not updates:
             self.get_logger().info("No update required in PNode/CNodes")
 
-    def add_pnode_trace(self, pnode, trace):
-        confidences = list(np.ones(len(trace)))
+    def add_pnode_trace(self, pnode: str, trace: Episode, confidence: float = 1.0):
+        """
+        Adds the perceptions of a trace to a P-Node as points.
+
+        :param pnode: Name of the P-Node.
+        :type pnode: str
+        :param trace: The trace.
+        :type trace: cognitive_nodes.episode.Episode
+        :param confidence: Confidence of the points, defaults to 1.0.
+        :type confidence: float
+        :return: True if the P-Node added them.
+        :rtype: bool
+        """
+        confidences = np.full(len(trace), confidence)
         added = self.add_pnode_points(pnode, trace, confidences)
         return added
 
-    def add_pnode_antitrace(self, pnode, antitrace):
-        confidences = list(-np.ones(len(antitrace)))
+    def add_pnode_antitrace(self, pnode: str, antitrace: Episode, confidence: float = 1.0):
+        """
+        Adds the perceptions of a trace to a P-Node as anti-points (negative confidence).
+
+        :param pnode: Name of the P-Node.
+        :type pnode: str
+        :param antitrace: The trace.
+        :type antitrace: cognitive_nodes.episode.Episode
+        :param confidence: Absolute value of the confidence of the anti-points, defaults to 1.0.
+        :type confidence: float
+        :return: True if the P-Node added them.
+        :rtype: bool
+        """
+        confidences = np.full(len(antitrace), -confidence)
         added = self.add_pnode_points(pnode, antitrace, confidences)
         return added
 
-    def add_pnode_points(self, pnode, trace, confidences):
+    def add_pnode_points(self, pnode: str, trace: Episode, confidences: np.ndarray):
+        """
+        Adds the perceptions of a trace to a P-Node, in the process thread.
+
+        :param pnode: Name of the P-Node.
+        :type pnode: str
+        :param trace: The trace.
+        :type trace: cognitive_nodes.episode.Episode
+        :param confidences: Confidence of each point.
+        :type confidences: numpy.ndarray
+        :return: True if the P-Node added them.
+        :rtype: bool
+        """
         service_name = "pnode/" + str(pnode) + "/add_points"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(
-                AddPoints, service_name
-            )
-        points = [perception_dict_to_msg(episode.old_perception) for episode, _ in trace]
-        response = self.node_clients[service_name].send_request(points=points, confidences=confidences)
+        points = trace.perception # TODO: Remove the last element of this container, shouldn't be included as part of the trace data
+        response = self.call_services([(self.own_client(AddPoints, service_name), AddPoints.Request(points=points.to_msg(), confidences=confidences.tolist()))])[0]
         return response.added
+    
+    def initialize_buffer(self):
+        """
+        Reads the perceptions and configures the labels of the episodic buffer of the parent node if needed.
+        """
+        self.get_logger().info("Initializing episodic buffer...")
+        self.current_episode.perception = self.read_perceptions()
+        with self.node.episodic_buffer.semaphore:
+            if (not self.node.episodic_buffer.input_labels and self.node.episodic_buffer.inputs) or (not self.node.episodic_buffer.output_labels and self.node.episodic_buffer.outputs):
+                self.node.episodic_buffer.configure_labels(self.current_episode)
 
     def deliberation_cycle(self):
+        """
+        Runs one deliberation cycle, once run_cycle requests it: in each step it generates candidate actions, predicts
+        their perceptions and utilities, selects and executes an action, and checks the rewards, until a linked goal is
+        reached or iterations is exceeded. At the end it updates the LTM (unless it is an exploration process) and calls
+        finish_cycle.
+        """
         self.start_flag.wait()
 
         self.get_logger().info("Deliberation process started")
-        self.current_world = self.get_current_world_model()
         self.current_episode.perception = self.read_perceptions()
         self.summary_episode.old_perception = self.current_episode.perception
         self.update_activations()
+        self.update_current_world()
         self.summary_episode.old_ltm_state = deepcopy(self.LTM_cache)
         self.active_goals = self.get_goals(self.LTM_cache)
-        self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        self.current_episode.update_reward(reward_list, self.get_clock().now())
         self.iteration = 1
         achieved = False
 
@@ -358,19 +459,20 @@ class Deliberation(CognitiveProcess):
                     "*** DELIBERATION STEP: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
                 self.update_activations()
+                self.update_current_world()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 # GENERATE POSSIBLE ACTIONS
-                candidate_actions = self.generate_candidate_actions(self.current_episode.perception, self.candidate_generation)
+                candidates = self.generate_candidate_actions(self.current_episode.perception, self.candidate_generation)
                 # PREDICT EXPECTED PERCEPTIONS
                 predicted_episodes = self.predict_perceptions(
-                    self.current_world, candidate_actions
+                    self.current_world, candidates
                 )
                 # GET EXPECTED UTILITIES
                 predicted_utilities = self.predict_utilities(predicted_episodes)
                 # SELECT ACTION
-                self.current_episode.action = self.select_action(candidate_actions, predicted_episodes, predicted_utilities)
+                self.current_episode.action = self.select_action(candidates.action, predicted_episodes, predicted_utilities)
                 # EXECUTE ACTION
-                self.execute_action(self.current_episode.perception, self.current_episode.action)
+                self.execute_action(self.current_episode.action)
                 self.current_episode.parent_policy = self.node.name if not self.exploration_process else ""
                 self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
                 self.update_activations()
@@ -380,32 +482,45 @@ class Deliberation(CognitiveProcess):
                 )
                 
                 self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
-                self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                reward_list = self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
+                self.current_episode.update_reward(reward_list, self.get_clock().now())
                 achieved = self.check_completion()
                 self.publish_episode()
                 self.iteration += 1
         self.summary_episode.perception = self.current_episode.perception
-        self.summary_episode.reward_list = self.current_episode.reward_list
+        self.summary_episode.rewards = self.current_episode.rewards
+        self.summary_episode.action = self.current_episode.action
+        self.summary_episode.domain_name = self.current_episode.domain_name
         if not achieved and hasattr(self.node.episodic_buffer, "add_antitrace"):
             self.node.episodic_buffer.add_antitrace()
         if not self.exploration_process:
             self.update_ltm(self.summary_episode)
-        self.finished_flag.set()
-        self.start_flag.clear()
-    
+        self.node.after_deliberation()
+        self.finish_cycle()
+
+    def update_current_world(self):
+        """
+        Selects the world model. It must be called after update_activations, which applies the changes
+        of the LTM: while the process waits to start a cycle, new world models may have been created.
+        """
+        self.current_world = self.get_current_world_model()
+        self.current_episode.domain_name = self.current_world if self.current_world else ""
+
 
     def run(self):
-        self.current_episode.perception = self.read_perceptions()
-        self.node.episodic_buffer.configure_labels(self.current_episode)
+        """
+        Loop of the process thread: runs deliberation cycles. An exception in a cycle is logged and finishes that cycle, so
+        the callback waiting for it doesn't wait forever.
+        """
+        self.initialize_buffer()
         while True:
             try:
                 self.deliberation_cycle()
             except Exception as e:
                 self.get_logger().error(f"Exception in deliberation cycle: {e}")
                 self.get_logger().error(traceback.format_exc())
-                self.finished_flag.set()
-                self.start_flag.clear()
-                break
+                # The process goes on: the callback waiting for this cycle and the next ones must not wait forever
+                self.finish_cycle()
 
 
 

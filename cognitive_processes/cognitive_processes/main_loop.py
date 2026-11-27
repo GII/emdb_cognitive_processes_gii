@@ -1,4 +1,5 @@
 import sys
+import os
 import rclpy
 from rclpy.node import Node
 from operator import attrgetter
@@ -8,29 +9,23 @@ import threading
 import numpy
 import time
 from copy import copy, deepcopy
+from collections import deque
 
-from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 
-from core.service_client import ServiceClient
+from core.container import Container
 from cognitive_nodes.episode import Episode
-from cognitive_node_interfaces.srv import (
-    Execute,
-    GetActivation,
-    GetReward,
-    GetInformation,
-    AddPoint,
-    IsSatisfied
-)
+from cognitive_node_interfaces.srv import Execute
 from cognitive_processes.cognitive_process import CognitiveProcess
-from cognitive_nodes.episode import episode_msg_to_obj
-from core_interfaces.srv import CreateNode, SetChangesTopic, UpdateNeighbor, StopExecution
+from cognitive_nodes.episode import container_msg_to_episode
+from core.utils import class_from_classname
+
+
+from core_interfaces.srv import StopExecution
 from cognitive_node_interfaces.msg import Activation
 from cognitive_processes_interfaces.msg import ControlMsg
-from cognitive_node_interfaces.msg import Episode as EpisodeMsg
-from std_msgs.msg import String
 
-from core.utils import perception_dict_to_msg, perception_msg_to_dict, actuation_dict_to_msg, actuation_msg_to_dict, class_from_classname
 
 
 class MainLoop(CognitiveProcess):
@@ -41,15 +36,24 @@ class MainLoop(CognitiveProcess):
     # =========================
     # INITIALIZATION & SETUP
     # =========================
-    def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, **params):
+    def __init__(self, name, softmax_selection = False, softmax_temperature = 1, kill_on_finish = False, pnode_threshold = 0.05, **params):
         """
-        Constructor for the MainLoop class.
-        Initializes the MainLoop node and starts the main loop execution.
+        Constructor for the MainLoop class. The main loop starts in the process thread after the
+        constructor (see cognitive_processes.cognitive_process.StartsAfterConstruction).
 
-        :param node: The ROS2 Node instance.
-        :type node: rclpy.node.Node
         :param name: The name of the MainLoop node.
         :type name: str
+        :param softmax_selection: Select policies with a softmax function instead of the maximum activation,
+            defaults to False.
+        :type softmax_selection: bool
+        :param softmax_temperature: Temperature of the softmax function, defaults to 1.
+        :type softmax_temperature: float
+        :param kill_on_finish: Stop the whole system when the experiment finishes, defaults to False.
+        :type kill_on_finish: bool
+        :param pnode_threshold: Threshold for the policy nodes, defaults to 0.05.
+        :type pnode_threshold: float
+        :param params: Other parameters of the process (see CognitiveProcess).
+        :type params: dict
         """
         super().__init__(name, **params)
         
@@ -61,6 +65,7 @@ class MainLoop(CognitiveProcess):
         self.current_reward = 0
         self.softmax_selection = softmax_selection
         self.softmax_temperature = softmax_temperature
+        self.pnode_threshold = pnode_threshold
 
         # --- Node/goal/drive management ---
         self.n_cnodes = 0
@@ -68,6 +73,13 @@ class MainLoop(CognitiveProcess):
 
         # --- File/output management ---
         self.files = []
+        # Only the loop thread writes the files. The episodes callback just queues the episodes, which
+        # the loop thread writes in update_status and close_files. files_lock is only shared with
+        # destroy_node, which closes the files when the execution node shuts down; no callback takes it,
+        # so the loop thread can hold it while the files wait for service responses.
+        self.files_lock = threading.Lock()
+        self.files_closed = False
+        self.pending_episodes = deque()  # Episodes received and not written yet (deque: thread safe appends and pops)
         self.pnodes_success = {}
 
         # --- Experiment tracking ---
@@ -77,10 +89,14 @@ class MainLoop(CognitiveProcess):
         self.last_reset = 0
         self.kill_on_finish = kill_on_finish
 
-        # Read LTM and configure perceptions
+        # The process thread (setup and run) starts after the constructor
         self.set_attributes_from_params(params)
-        self.setup()
-        self.start_threading()
+
+        # The loop resets the world at the start and between trials, only through the world reset service.
+        # Checked here, so that the experiment fails to load (instead of failing in setup) if it is missing.
+        control = getattr(self, "Control", None) or {}
+        if not (control.get("world_reset_service") and control.get("world_reset_msg")):
+            raise ValueError("The main loop needs the world reset service: Control must define world_reset_service and world_reset_msg")
 
 
     # =========================
@@ -92,11 +108,16 @@ class MainLoop(CognitiveProcess):
         Initial configuration of the MainLoop node.
         This method sets up the LTM, perceptions, files, connectors, control channel, etc.
         """
-        super().setup()
+        # The files go first: the episode subscription created by the base setup writes to them
         self.setup_files()
-        self.kill_commander_client = ServiceClient(StopExecution, 'commander/kill')
+        super().setup()
+        self.kill_commander_client = self.own_client(StopExecution, 'commander/kill')
 
     def setup_control_channel(self):
+        """
+        Configures the control channel and subscribes to the episodes topic, where the policies and other
+        processes also publish.
+        """
         super().setup_control_channel()
         episodes_msg=self.Control["episodes_msg"]
         episodes_topic=self.Control["episodes_topic"]
@@ -107,11 +128,12 @@ class MainLoop(CognitiveProcess):
     # =========================
 
     def receive_episode_callback(self, msg):
-       self.episode_count+=1
-       for file in self.files:
-            if file.file_object is None:
-                file.write_header()
-            file.write_episode(msg)
+        """
+        Queues a received episode. The loop thread writes it to the files (see write_pending_episodes),
+        so this callback never waits for the files.
+        """
+        self.episode_count+=1
+        self.pending_episodes.append(msg)
 
     # =========================
     # File Handling
@@ -147,19 +169,66 @@ class MainLoop(CognitiveProcess):
         """
 
         self.get_logger().info("Writing files publishing status...")
-        self.get_logger().debug(f"DEBUG: {self.pnodes_success}")
-        for file in self.files:
-            if file.file_object is None:
-                file.write_header()
-            file.write()
+        with self.files_lock:
+            if self.files_closed:
+                return
+            self.write_pending_episodes()
+            for file in self.files:
+                self.get_logger().info(f"Writing file: {file.file_name}")
+                self.open_file(file)
+                file.write()
+
+    def write_pending_episodes(self):
+        """
+        Writes the queued episodes to the files, in the order they were received. It must be called
+        with files_lock held.
+        """
+        while self.pending_episodes:
+            msg = self.pending_episodes.popleft()
+            for file in self.files:
+                self.open_file(file)
+                file.write_episode(msg)
+
+    def open_file(self, file):
+        """
+        Opens a file (and writes its header) the first time it is used. It must be called with
+        files_lock held.
+
+        :param file: The file.
+        :type file: core.file.File
+        """
+        if file.file_object is None:
+            file.write_header()
 
     def close_files(self):
         """
-        Close all files when execution is finished.
+        Close all files when execution is finished, after writing the queued episodes. Files are
+        closed only once.
         """
-        self.get_logger().info("Closing files...")
-        for file in self.files:
-            file.close()
+        with self.files_lock:
+            if self.files_closed:
+                return
+            self.write_pending_episodes()
+            self.files_closed = True
+            self.get_logger().info("Closing files...")
+            for file in self.files:
+                self.get_logger().info(f"Closing file: {file.file_name}")
+                file.close()
+
+    def destroy_node(self):
+        """
+        Stops the loop and closes the files before destroying the node. Execution nodes destroy
+        their nodes when they shut down, also when the process receives SIGTERM (e.g. from the
+        commander at the end of the experiment) or SIGINT, so the files are always closed. Some of
+        them are only written when they are closed (e.g. the episodes dataset).
+
+        Then it runs after the executor has stopped, not in a callback. If the loop thread is writing
+        the files, it waits until it finishes. A node deleted through the delete service of its
+        execution node is destroyed in a callback, so that wait would block the executor.
+        """
+        self.stop = True
+        self.close_files()
+        return super().destroy_node()
     
     # =========================
     # PUBLISHING & STATUS
@@ -222,10 +291,11 @@ class MainLoop(CognitiveProcess):
         self.get_logger().info("Select_policy - Activations: " + str(all_policy_activations))
         self.get_logger().info("Discarded policies: " + str(set(policies)-set(policies_filtered)))
 
-        if not policy_pool[selected]:
+        selected_activation = policy_pool.get(selected, 0.0)
+        if selected_activation <= 0:
             selected = self.random_policy()
 
-        self.get_logger().info(f"Selected policy => {selected} ({policy_pool[selected]})")
+        self.get_logger().info(f"Selected policy => {selected} ({policy_pool.get(selected, 'N/A')})")
 
         return selected
     
@@ -327,7 +397,7 @@ class MainLoop(CognitiveProcess):
         This method updates the LTM with the perception changes, policy executed and reward obtained.
 
         :param stm: Episode object containing the information to update the LTM.
-        :type stm: cognitive_processes.main_loop.Episode
+        :type stm: cognitive_nodes.episode.Episode
         """
         self.update_pnodes_reward_basis(stm.old_perception, stm.perception, stm.parent_policy, copy(stm.reward_list), stm.old_ltm_state)
 
@@ -364,6 +434,7 @@ class MainLoop(CognitiveProcess):
         policy_neighbors = self.request_neighbors(policy)
         cnodes = [node["name"] for node in policy_neighbors if node["node_type"] == "CNode"]
         cnode_activations = self.get_node_activations_by_list(cnodes, ltm_cache)
+        goals_activations = self.get_node_activations_by_list(reward_list.keys(), ltm_cache)
         threshold = self.activation_threshold
         updates = False
         point_added = False
@@ -375,69 +446,113 @@ class MainLoop(CognitiveProcess):
                     neighbor["name"]
                     for neighbor in cnode_neighbors
                     if neighbor["node_type"] == "WorldModel"
-                )
+                ), None
             )
             goal = next(
                 (
                     neighbor["name"]
                     for neighbor in cnode_neighbors
                     if neighbor["node_type"] == "Goal"
-                )
+                ), None
             )
             pnode = next(
                 (
                     neighbor["name"]
                     for neighbor in cnode_neighbors
                     if neighbor["node_type"] == "PNode"
-                )
+                ), None
             )
 
-            world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
-            goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
-            pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
+            if world_model:
+                world_model_activation = self.get_node_data(world_model, ltm_cache)["activation"]
+            else:
+                world_model_activation = 1.0
+            if goal:
+                goal_activation = self.get_node_data(goal, ltm_cache)["activation"]
+            else:
+                goal_activation = 1.0
+            if pnode:
+                pnode_activation = self.get_node_data(pnode, ltm_cache)["activation"]
+            else:
+                pnode_activation = 1.0
 
             if world_model_activation > threshold and goal_activation > threshold:
                 reward = reward_list.get(goal, 0.0)
                 if (reward > threshold):
-                    reward_list.pop(goal)
+                    reward_list.pop(goal, 0.0)
                     if not point_added:
                         self.add_point(pnode, old_perception)
                         updates = True
                         point_added = True
-                elif pnode_activation > threshold:
+                        if pnode_activation > self.pnode_threshold:
+                            self.log_cnode_execution(cnode, True)
+                elif pnode_activation > self.pnode_threshold:
                     self.add_antipoint(pnode, old_perception)
+                    if not point_added:
+                        self.log_cnode_execution(cnode, False)
                     updates = True
 
-        for goal, reward in reward_list.items():
+        for goal in goals_activations.keys():
+            reward = reward_list.get(goal, 0.0)
             if (reward > threshold) and (not point_added):
                 if goal not in self.unlinked_drives:
-                    self.new_cnode(old_perception, goal, policy)
+                    if not self.duplicate_connected(goal, cnodes, ltm_cache): # Filter out duplicates of the goal in the CNodes connected to the policy
+                        if self.goal_has_cnode(goal, ltm_cache):
+                            goal = self.duplicate_node(goal, perception)
+                        self.add_point(goal, perception, node_type="goal")
+                        self.new_cnode(old_perception, goal, policy)
                 else:
                     drive = goal
-                    goal = self.new_goal(perception, drive)
-                    self.new_cnode(old_perception, goal, policy)
+                    new_goal = self.new_goal(perception, drive)
+                    self.new_cnode(old_perception, new_goal, policy)
                 point_added=True
                 updates = True
 
         if not updates:
             self.get_logger().info("No update required in PNode/CNodes")
 
-    def add_point(self, name, sensing, node_type="pnode"):
-        response = super().add_point(name, sensing, node_type=node_type)
+    def add_point(self, name, sensing, node_type="pnode", confidence=1.0):
+        """
+        Adds a point to the specified node and, in a P-Node, records it as a success.
+
+        :param name: Name of the node to which the point is added.
+        :type name: str
+        :param sensing: Sensing data to be used for the point.
+        :type sensing: core.container.Container
+        :param node_type: Type of the node, defaults to "pnode".
+        :type node_type: str
+        :param confidence: Confidence of the point, defaults to 1.0.
+        :type confidence: float
+        :return: The response of the node, or False if there is no name.
+        :rtype: bool
+        """
+        if not name:
+            self.get_logger().warning("add_point called with empty name, skipping...")
+            return False
+        response = super().add_point(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = True
         return response
     
-    def add_antipoint(self, name, sensing, node_type="pnode"):
+    def add_antipoint(self, name, sensing, node_type="pnode", confidence=1.0):
         """
         Adds an antipoint to the specified PNode.
 
         :param name: Name of the PNode to which the antipoint is added.
         :type name: str
         :param sensing: Sensing data to be used for the antipoint.
-        :type sensing: dict
+        :type sensing: core.container.Container
+        :param node_type: Type of the node, defaults to "pnode".
+        :type node_type: str
+        :param confidence: Confidence of the antipoint, defaults to 1.0.
+        :type confidence: float
+        :return: The response of the node, or False if there is no name.
+        :rtype: bool
         """
-        response = super().add_antipoint(name, sensing, node_type=node_type)
+        if not name:
+            self.get_logger().warning("add_antipoint called with empty name, skipping...")
+            return False
+        response = super().add_antipoint(name, sensing, node_type=node_type, confidence=confidence)
         if node_type == "pnode":
             self.pnodes_success[name] = False
         return response
@@ -472,16 +587,23 @@ class MainLoop(CognitiveProcess):
             pass
         if changed:
             if self.iteration>0:
-                iterations=self.iteration-self.last_reset
-                self.trials_data.append((self.iteration, self.goal_count, self.episode_count, finished))
+                iteration_span = self.iteration - self.last_reset
+                self.trials_data.append(
+                    (
+                        self.iteration,
+                        self.goal_count,
+                        iteration_span,
+                        self.episode_count,
+                        finished,
+                    )
+                )
                 self.episode_count=0
                 self.goal_count+=1
                 self.last_reset=self.iteration
             current_world = self.current_world if self.current_world else "None"
-            if getattr(self, "world_reset_client", None):
-                self.get_logger().info("Requesting world reset service...")
-                self.world_reset_client.send_request(iteration=self.iteration, world=current_world)
-            self.get_logger().info("Asking for a world reset...")
+            self.get_logger().info("Requesting world reset service...")
+            self.call_services([(self.world_reset_client, self.world_reset_client.srv_type.Request(iteration=self.iteration, world=current_world))])
+            # The world has been reset. The control topic only notifies it, e.g. to nodes that keep the episodes of a trial
             msg = ControlMsg()
             msg.command = "reset_world"
             msg.world = current_world
@@ -504,11 +626,35 @@ class MainLoop(CognitiveProcess):
         return finished
 
     # =========================
+    # GOALS, REWARDS, NEEDS
+    # =========================
+    def update_rewards(self, old_perception, perception, ltm_cache, write_current_episode=True):
+        """
+        Update the rewards based on the old and new perceptions.
+
+        :param old_perception: The perception before the action.
+        :type old_perception: core.container.Container
+        :param perception: The perception after the action.
+        :type perception: core.container.Container
+        :param ltm_cache: LTM cache containing the nodes and their data.
+        :type ltm_cache: dict
+        :param write_current_episode: Update the spaces of the goals and write the rewards in the current
+            episode, defaults to True.
+        :type write_current_episode: bool
+        """
+        self.active_goals = self.get_goals(ltm_cache)
+        update_space = write_current_episode
+        reward_list = self.get_goals_reward(old_perception, perception, ltm_cache, update_space=update_space)
+        if write_current_episode:
+            self.current_episode.update_reward(reward_list, self.get_clock().now())
+
+    # =========================
     # MAIN LOOP
     # =========================
     def run(self):
         """
-        Run the main loop of the system.
+        Run the main loop of the system, in the process thread. If the environment variable EMDB_PERF_FILE contains
+        a path, the wall-clock time at the end of each iteration is recorded in that file.
         """
 
         self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
@@ -517,9 +663,11 @@ class MainLoop(CognitiveProcess):
         self.reset_world()
         self.current_episode.perception = self.read_perceptions()
         self.update_activations()
-        self.active_goals = self.get_goals(self.LTM_cache)
-        self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
+        self.update_rewards(self.current_episode.old_perception, self.current_episode.perception, self.LTM_cache)
         self.iteration = 1
+        # PERF: EMDB_PERF_FILE=<path> records the wall-clock time at the end of each iteration.
+        perf_path = os.environ.get("EMDB_PERF_FILE")
+        perf_file = open(perf_path, "w", buffering=1) if perf_path else None
         
         while (self.iteration <= self.iterations) and (not self.stop):
 
@@ -528,12 +676,14 @@ class MainLoop(CognitiveProcess):
                 self.get_logger().info(
                     "*** ITERATION: " + str(self.iteration) + "/" + str(self.iterations) + " ***"
                 )
+                self.current_world = self.get_current_world_model()
                 self.publish_iteration()
                 self.update_activations()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, _ = self.execute_policy(self.current_episode.perception, self.current_policy)
                 self.current_episode.parent_policy = self.current_policy
+                self.current_episode.domain_name = self.current_world if self.current_world else ""
                 self.current_episode.old_perception, self.current_episode.perception = self.current_episode.perception, self.read_perceptions()
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
@@ -543,34 +693,36 @@ class MainLoop(CognitiveProcess):
                 )
 
 
-                self.active_goals = self.get_goals(self.current_episode.old_ltm_state)
-                self.current_episode.reward_list= self.get_goals_reward(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
-
+                self.update_rewards(self.current_episode.old_perception, self.current_episode.perception, self.current_episode.old_ltm_state)
                 self.publish_episode()
-
                 self.update_ltm(self.current_episode)
 
 
                 if self.reset_world():
                     reset_sensing = self.read_perceptions()
                     self.update_activations()
+                    self.update_rewards(self.current_episode.old_perception, reset_sensing, self.LTM_cache, write_current_episode=False)
                     self.current_episode.perception = reset_sensing
                     self.current_episode.ltm_state = self.LTM_cache
 
-                # self.update_policies_to_test(
-                #     policy=(
-                #         self.current_policy
-                #         if not self.sensorial_changes(self.current_episode.perception, self.current_episode.old_perception)
-                #         else None
-                #     )
-                # )
+                self.update_policies_to_test(
+                    policy=(
+                        self.current_policy
+                        if not self.sensorial_changes(self.current_episode.perception, self.current_episode.old_perception)
+                        else None
+                    )
+                )
                 
                 self.update_status()
+                if perf_file:
+                    perf_file.write(f"{self.iteration} {time.time():.6f}\n")
                 self.iteration += 1
 
+        if perf_file:
+            perf_file.close()
         self.close_files()
         if self.kill_on_finish:
-            self.kill_commander_client.send_request()
+            self.call_services([(self.kill_commander_client, StopExecution.Request())])
 
 
 class MainLoopLight(MainLoop):
@@ -580,11 +732,13 @@ class MainLoopLight(MainLoop):
 
     def __init__(self, name, **params):
         """
-        Constructor for the MainLoopLight class.
-        Initializes the MainLoopLight node and starts the main loop execution.
+        Constructor for the MainLoopLight class. The main loop starts in the process thread after the
+        constructor (see cognitive_processes.cognitive_process.StartsAfterConstruction).
 
-        :param node: The ROS2 Node instance.
-        :type node: rclpy.node.Node
+        :param name: The name of the node.
+        :type name: str
+        :param params: Other parameters (see MainLoop).
+        :type params: dict
         """
         super().__init__(name, **params)
 
@@ -616,7 +770,7 @@ class MainLoopLight(MainLoop):
         This method sends a request to the policy to be executed.
 
         :param perception: The perception to be used in the policy execution.
-        :type perception: dict
+        :type perception: core.container.Container
         :param policy: The policy to execute.
         :type policy: str
         :return: The response from executing the policy.
@@ -630,17 +784,16 @@ class MainLoopLight(MainLoop):
             service_name = "utility_model/" + str(policy) + "/execute"
         else:
             service_name = "policy/" + str(policy) + "/execute"
-        if service_name not in self.node_clients:
-            self.node_clients[service_name] = ServiceClient(Execute, service_name)
-        perc_msg=perception_dict_to_msg(perception)
-        policy_response = self.node_clients[service_name].send_request(perception=perc_msg)
-        episode = episode_msg_to_obj(policy_response.episode)
+        perc_msg=perception.to_msg()
+        policy_response = self.call_services([(self.own_client(Execute, service_name), Execute.Request(perception=perc_msg))])[0]
+        episode = container_msg_to_episode(policy_response.episode)
         self.get_logger().info("Executed policy " + str(policy_response.policy) + "...")
         return policy_response.policy, episode 
 
     def run(self):
         """
-        Run the main loop of the system.
+        Run the main loop of the system. If the environment variable EMDB_PERF_FILE contains a path, the wall-clock
+        time at the end of each iteration is recorded in that file, as in MainLoop.run.
         """
 
         self.get_logger().info("Running MDB with LTM:" + str(self.LTM_id))
@@ -650,6 +803,9 @@ class MainLoopLight(MainLoop):
         self.current_episode.perception = self.read_perceptions()
         self.update_activations()
         self.iteration = 1
+        # PERF: EMDB_PERF_FILE=<path> records the wall-clock time at the end of each iteration (as in MainLoop.run).
+        perf_path = os.environ.get("EMDB_PERF_FILE")
+        perf_file = open(perf_path, "w", buffering=1) if perf_path else None
         
         while (self.iteration <= self.iterations) and (not self.stop):
 
@@ -660,16 +816,19 @@ class MainLoopLight(MainLoop):
                 )
                 self.publish_iteration()
                 self.update_activations()
+                self.current_world = self.get_current_world_model()
                 self.current_episode.old_ltm_state=deepcopy(self.LTM_cache)
                 self.current_policy = self.select_policy(softmax=self.softmax_selection)
                 self.current_policy, resulting_episode = self.execute_policy(self.current_episode.perception, self.current_policy)
                 self.current_episode.parent_policy = self.current_policy
+                self.current_episode.domain_name = resulting_episode.domain_name
                 self.current_episode.old_perception = self.current_episode.perception
                 if resulting_episode.perception:
                     self.current_episode.perception = resulting_episode.perception
                 else:
                     self.current_episode.perception = self.read_perceptions()
-                self.current_episode.reward_list = resulting_episode.reward_list
+                self.current_episode.rewards = resulting_episode.rewards
+                self.current_episode.action = resulting_episode.action
                 self.update_activations()
                 self.current_episode.ltm_state=deepcopy(self.LTM_cache)
 
@@ -694,11 +853,15 @@ class MainLoopLight(MainLoop):
                     )
                 )
                 self.update_status()
+                if perf_file:
+                    perf_file.write(f"{self.iteration} {time.time():.6f}\n")
                 self.iteration += 1
 
+        if perf_file:
+            perf_file.close()
         self.close_files()
         if self.kill_on_finish:
-            self.kill_commander_client.send_request()
+            self.call_services([(self.kill_commander_client, StopExecution.Request())])
 
 def main(args=None):
     rclpy.init()
